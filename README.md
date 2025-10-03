@@ -30,6 +30,7 @@ azfunc-MVP-DispensAI/
 │   │   ├── openai_chained_service.py    # Encapsula la llamada de respuesta encadenada a OpenAI
 │   │   ├── openai_client_factory.py     # Centraliza la autenticación y creación del cliente OpenAI
 │   │   ├── openai_file_service.py       # Gestiona solicitudes con archivo (subida a OpenAI)
+│   │   ├── openai_http_client.py        # Cliente HTTP que invoca las funciones internas de OpenAI
 │   │   └── service_bus_dispatcher.py    # Envía mensajes de tareas a Service Bus
 │   └── utils/
 │       ├── blob_url_parser.py           # Extrae contenedor y nombre de blob a partir de la URL
@@ -42,12 +43,12 @@ azfunc-MVP-DispensAI/
 ```
 
 ## Detalle de la arquitectura
-- **`function_app.py`**: capa de controllers. Allí se resuelven variables de entorno, se instancian repositorios/servicios y se definen los tres handlers. Cada handler valida la entrada y delega en su servicio correspondiente, retornando exactamente lo que el servicio produce.
+- **`function_app.py`**: capa de controllers. Allí se resuelven variables de entorno, se instancian repositorios/servicios y se definen los handlers HTTP y Service Bus. Los endpoints HTTP `request-with-file` y `chained-request` reutilizan la lógica de OpenAI y son consumidos internamente por `dispensas_process`.
 - **Modelos (`src/models/`)**: encapsulan y validan los datos de entrada.
   - `QueueMessageModel` normaliza el mensaje de Service Bus inicial (proyecto, tipo de disparo, documentos, prompts, modelo).
   - `DispensaTaskModel` representa la tarea a nivel de documento que consumirá la función `dispensas_process`.
 - **Interfaces y repositorios**: `BlobStorageInterface` define el contrato para trabajar con blobs y `BlobStorageRepository` implementa la lógica con `BlobServiceClient`, incluyendo subir texto/bytes, descargar y listar blobs con logs en español.
-- **Servicios OpenAI**: `OpenAIClientFactory` abstrae la autenticación (API Key o Azure AD). `OpenAIFileService` porta la lógica de `request_with_file` (descargar blob, subir a OpenAI, obtener respuesta). `OpenAIChainedService` encapsula `previous_response_id` para continuar la conversación. `DispensasProcessorService` coordina ambos servicios y devuelve los datos parseados. `BlobDispatcherService` fan-out de tareas según proyecto/documento. `notifications_service.py` permanece como servicio auxiliar preexistente.
+- **Servicios OpenAI**: `OpenAIClientFactory` abstrae la autenticación (API Key o Azure AD). `OpenAIFileService` porta la lógica de `request_with_file` (descargar blob, subir a OpenAI, obtener respuesta). `OpenAIChainedService` encapsula `previous_response_id` para continuar la conversación. `OpenAIHttpClient` llama a los endpoints HTTP internos. `DispensasProcessorService` usa este cliente HTTP para orquestar el flujo de respuestas. `BlobDispatcherService` fan-out de tareas según proyecto/documento. `notifications_service.py` permanece como servicio auxiliar preexistente.
 - **Utilidades (`src/utils/`)**: funciones de apoyo reutilizables (parseo de URL de blob, determinación de content-type, extracción de texto/JSON de OpenAI, payloads de email).
 - **Utilidades (`src/utils/`)**: funciones de apoyo reutilizables (parseo de URL de blob, determinación de content-type, extracción de texto/JSON de OpenAI, lectura de prompts desde archivos, payloads de email).
 
@@ -60,11 +61,10 @@ azfunc-MVP-DispensAI/
 
 2. **Dispensas Process (`ServiceBusQueueTrigger`)**
    - Consume cada `DispensaTaskModel` de la cola.
-   - `DispensasProcessorService` ejecuta:
-     1. Descarga del archivo desde Blob Storage.
-     2. Subida del archivo a OpenAI y obtención de la primera respuesta (`OpenAIFileService`).
-     3. Solicitud encadenada con la respuesta previa (`OpenAIChainedService`).
-     4. Conversión del contenido retornado a JSON (`response_parser.parse_json_response`).
+   - `DispensasProcessorService` llama a los endpoints HTTP internos:
+     1. `request-with-file`: prepara el archivo, lo sube a OpenAI y devuelve la respuesta inicial.
+     2. `chained-request`: reutiliza el `response_id` anterior para obtener la respuesta encadenada.
+     3. Convierte el contenido retornado a JSON (`response_parser.parse_json_response`).
    - Devuelve un diccionario con metadatos del documento, respuestas raw y JSON parseado listo para persistir o publicar.
 
 3. **CSV Global (`HTTP Trigger`, pendiente)**
@@ -80,6 +80,7 @@ azfunc-MVP-DispensAI/
 
 ### Estado actual de las funciones 1 y 2
 - **Handlers listos**: `router` y `dispensas_process` ya existen en `function_app.py` y delegan en los servicios correspondientes.
+- **Endpoints HTTP**: `request-with-file` y `chained-request` expuestos como API reutilizando la lógica de OpenAI; `dispensas_process` los invoca mediante `OpenAIHttpClient`.
 - **Servicios y utilidades portados**: flujo `request_with_file` y `chained_request` encapsulado en `openai_file_service.py` y `openai_chained_service.py`; fan-out y publicación en Service Bus resuelto con `blob_dispatcher.py` y `service_bus_dispatcher.py`.
 - **Pendiente**:
   - Actualizar `local.settings.json` (o variables de aplicación) con `SERVICE_BUS_CONNECTION`, `ROUTER_QUEUE_NAME`, `PROCESS_QUEUE_NAME`, `DEFAULT_OPENAI_MODEL`, `DEFAULT_AGENT_PROMPT`, `DEFAULT_CHAINED_PROMPT` y credenciales de Blob/OpenAI.
@@ -93,6 +94,8 @@ azfunc-MVP-DispensAI/
 - `ROUTER_QUEUE_NAME`, `PROCESS_QUEUE_NAME`: nombres de las colas (por defecto `dispensas-router-in` y `dispensas-process-in`).
 - `DEFAULT_OPENAI_MODEL`, `DEFAULT_AGENT_PROMPT`, `DEFAULT_CHAINED_PROMPT`: valores por defecto utilizados cuando el mensaje de la cola no los especifica.
 - `DEFAULT_AGENT_PROMPT_FILE`, `DEFAULT_CHAINED_PROMPT_FILE`: nombres de archivos (relativos a `src/prompts/`) desde los que se cargarán los prompts; si se omiten, se usan los valores inline anteriores como fallback.
+- `INTERNAL_API_BASE_URL`: URL base del Function App para invocar los endpoints HTTP internos (por defecto `http://127.0.0.1:7071/api` en local).
+- `INTERNAL_API_KEY`: clave opcional (`x-functions-key`) si los endpoints HTTP requieren autenticación (`FUNCTION` o `ADMIN`).
 
 ## Referencia cruzada
 - Proyecto base: `/Users/jenny/Downloads/openai_responses_function_app`. De allí se portaron las funcionalidades `request_with_file` y `chained_request`, hoy encapsuladas en `openai_file_service.py` y `openai_chained_service.py`.

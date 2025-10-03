@@ -12,6 +12,7 @@ from src.services.dispensas_processor import DispensasProcessorService
 from src.services.openai_chained_service import OpenAIChainedService
 from src.services.openai_client_factory import OpenAIClientFactory
 from src.services.openai_file_service import OpenAIFileService
+from src.services.openai_http_client import OpenAIHttpClient
 from src.services.service_bus_dispatcher import ServiceBusDispatcher
 from src.utils.prompt_loader import load_prompt_with_fallback
 
@@ -36,6 +37,9 @@ DEFAULT_CHAINED_PROMPT = load_prompt_with_fallback(
     os.getenv("DEFAULT_CHAINED_PROMPT"),
 )
 
+INTERNAL_API_BASE_URL = os.getenv("INTERNAL_API_BASE_URL", "http://127.0.0.1:7071/api")
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")
+
 if not BLOB_CONNECTION_STRING:
     raise ValueError("La variable 'AZURE_STORAGE_CONNECTION_STRING' es obligatoria")
 if not DEFAULT_BLOB_CONTAINER:
@@ -51,7 +55,11 @@ blob_repository = BlobStorageRepository(
 openai_client_factory = OpenAIClientFactory()
 openai_file_service = OpenAIFileService(blob_repository, openai_client_factory)
 openai_chained_service = OpenAIChainedService(openai_client_factory)
-dispensas_processor_service = DispensasProcessorService(openai_file_service, openai_chained_service)
+openai_http_client = OpenAIHttpClient(
+    base_url=INTERNAL_API_BASE_URL,
+    function_key=INTERNAL_API_KEY,
+)
+dispensas_processor_service = DispensasProcessorService(openai_http_client)
 blob_dispatcher_service = BlobDispatcherService(
     blob_repository,
     default_model=DEFAULT_OPENAI_MODEL,
@@ -64,6 +72,118 @@ service_bus_dispatcher = ServiceBusDispatcher(
 )
 
 logger = logging.getLogger(__name__)
+
+
+@app.function_name(name="request_with_file")
+@app.route(route="request-with-file", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def request_with_file_http(req: func.HttpRequest) -> func.HttpResponse:
+    logger.info("Procesando solicitud HTTP request-with-file")
+    try:
+        payload = req.get_json()
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({"error": "El cuerpo de la petición debe ser un JSON válido"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    prompt = (payload.get("prompt") or "").strip()
+    model = (payload.get("model") or "").strip()
+    blob_url = (payload.get("blob_url") or payload.get("file_link") or "").strip()
+
+    if not prompt:
+        return func.HttpResponse(
+            json.dumps({"error": "El campo 'prompt' es obligatorio"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+    if not model:
+        return func.HttpResponse(
+            json.dumps({"error": "El campo 'model' es obligatorio"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+    if not blob_url:
+        return func.HttpResponse(
+            json.dumps({"error": "Se debe especificar 'blob_url' o 'file_link'"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    try:
+        result = openai_file_service.send_request_with_file(
+            blob_url=blob_url,
+            prompt=prompt,
+            model=model,
+        )
+        return func.HttpResponse(
+            json.dumps(result, ensure_ascii=False),
+            status_code=200,
+            mimetype="application/json",
+        )
+    except Exception as exc:  # pragma: no cover - errores propagados como 500
+        logger.exception("Error en request-with-file: %s", exc)
+        return func.HttpResponse(
+            json.dumps({"error": str(exc)}),
+            status_code=500,
+            mimetype="application/json",
+        )
+
+
+@app.function_name(name="chained_request")
+@app.route(route="chained-request", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def chained_request_http(req: func.HttpRequest) -> func.HttpResponse:
+    logger.info("Procesando solicitud HTTP chained-request")
+    try:
+        payload = req.get_json()
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({"error": "El cuerpo de la petición debe ser un JSON válido"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    prompt = (payload.get("prompt") or "").strip()
+    model = (payload.get("model") or "").strip()
+    previous_response_id = (payload.get("previous_response_id") or "").strip()
+
+    if not prompt:
+        return func.HttpResponse(
+            json.dumps({"error": "El campo 'prompt' es obligatorio"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+    if not model:
+        return func.HttpResponse(
+            json.dumps({"error": "El campo 'model' es obligatorio"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+    if not previous_response_id:
+        return func.HttpResponse(
+            json.dumps({"error": "El campo 'previous_response_id' es obligatorio"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    try:
+        result = openai_chained_service.send_chained_request(
+            model=model,
+            prompt=prompt,
+            previous_response_id=previous_response_id,
+        )
+        return func.HttpResponse(
+            json.dumps(result, ensure_ascii=False),
+            status_code=200,
+            mimetype="application/json",
+        )
+    except Exception as exc:
+        logger.exception("Error en chained-request: %s", exc)
+        return func.HttpResponse(
+            json.dumps({"error": str(exc)}),
+            status_code=500,
+            mimetype="application/json",
+        )
 
 
 @app.function_name(name="router")
