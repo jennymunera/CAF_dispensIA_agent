@@ -35,6 +35,7 @@ azfunc-MVP-DispensAI/
 │       ├── blob_url_parser.py           # Extrae contenedor y nombre de blob a partir de la URL
 │       ├── build_email_payload.py       # Utilidad previa para payloads de notificación
 │       ├── content_type.py              # Define filename y content-type basados en la extensión
+│       ├── prompt_loader.py             # Lee prompts desde archivos ubicados en `src/prompts`
 │       └── response_parser.py           # Extrae texto de respuestas OpenAI y convierte a JSON
 └── .vscode/
     └── settings.json            # Configuración del editor (VS Code)
@@ -48,6 +49,7 @@ azfunc-MVP-DispensAI/
 - **Interfaces y repositorios**: `BlobStorageInterface` define el contrato para trabajar con blobs y `BlobStorageRepository` implementa la lógica con `BlobServiceClient`, incluyendo subir texto/bytes, descargar y listar blobs con logs en español.
 - **Servicios OpenAI**: `OpenAIClientFactory` abstrae la autenticación (API Key o Azure AD). `OpenAIFileService` porta la lógica de `request_with_file` (descargar blob, subir a OpenAI, obtener respuesta). `OpenAIChainedService` encapsula `previous_response_id` para continuar la conversación. `DispensasProcessorService` coordina ambos servicios y devuelve los datos parseados. `BlobDispatcherService` fan-out de tareas según proyecto/documento. `notifications_service.py` permanece como servicio auxiliar preexistente.
 - **Utilidades (`src/utils/`)**: funciones de apoyo reutilizables (parseo de URL de blob, determinación de content-type, extracción de texto/JSON de OpenAI, payloads de email).
+- **Utilidades (`src/utils/`)**: funciones de apoyo reutilizables (parseo de URL de blob, determinación de content-type, extracción de texto/JSON de OpenAI, lectura de prompts desde archivos, payloads de email).
 
 ## Flujo de las funciones
 1. **Router (`ServiceBusQueueTrigger`)**
@@ -90,6 +92,7 @@ azfunc-MVP-DispensAI/
 - `SERVICE_BUS_CONNECTION`: cadena de conexión con permisos para enviar y recibir en las colas.
 - `ROUTER_QUEUE_NAME`, `PROCESS_QUEUE_NAME`: nombres de las colas (por defecto `dispensas-router-in` y `dispensas-process-in`).
 - `DEFAULT_OPENAI_MODEL`, `DEFAULT_AGENT_PROMPT`, `DEFAULT_CHAINED_PROMPT`: valores por defecto utilizados cuando el mensaje de la cola no los especifica.
+- `DEFAULT_AGENT_PROMPT_FILE`, `DEFAULT_CHAINED_PROMPT_FILE`: nombres de archivos (relativos a `src/prompts/`) desde los que se cargarán los prompts; si se omiten, se usan los valores inline anteriores como fallback.
 
 ## Referencia cruzada
 - Proyecto base: `/Users/jenny/Downloads/openai_responses_function_app`. De allí se portaron las funcionalidades `request_with_file` y `chained_request`, hoy encapsuladas en `openai_file_service.py` y `openai_chained_service.py`.

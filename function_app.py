@@ -13,6 +13,7 @@ from src.services.openai_chained_service import OpenAIChainedService
 from src.services.openai_client_factory import OpenAIClientFactory
 from src.services.openai_file_service import OpenAIFileService
 from src.services.service_bus_dispatcher import ServiceBusDispatcher
+from src.utils.prompt_loader import load_prompt_with_fallback
 
 app = func.FunctionApp()
 
@@ -26,8 +27,14 @@ BLOB_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 DEFAULT_BLOB_CONTAINER = os.getenv("DEFAULT_BLOB_CONTAINER")
 
 DEFAULT_OPENAI_MODEL = os.getenv("DEFAULT_OPENAI_MODEL")
-DEFAULT_AGENT_PROMPT = os.getenv("DEFAULT_AGENT_PROMPT")
-DEFAULT_CHAINED_PROMPT = os.getenv("DEFAULT_CHAINED_PROMPT")
+DEFAULT_AGENT_PROMPT = load_prompt_with_fallback(
+    os.getenv("DEFAULT_AGENT_PROMPT_FILE"),
+    os.getenv("DEFAULT_AGENT_PROMPT"),
+)
+DEFAULT_CHAINED_PROMPT = load_prompt_with_fallback(
+    os.getenv("DEFAULT_CHAINED_PROMPT_FILE"),
+    os.getenv("DEFAULT_CHAINED_PROMPT"),
+)
 
 if not BLOB_CONNECTION_STRING:
     raise ValueError("La variable 'AZURE_STORAGE_CONNECTION_STRING' es obligatoria")
