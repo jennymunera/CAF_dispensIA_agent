@@ -67,6 +67,8 @@ azfunc-MVP-DispensAI/
      3. Convierte el contenido retornado a JSON (`response_parser.parse_json_response`).
    - Devuelve un diccionario con metadatos del documento, respuestas raw y JSON parseado listo para persistir o publicar.
 
+   Los documentos de entrada por proyecto residen en `https://samvpdispensiacr.blob.core.windows.net/dispensia-documents/basedocuments/{project}/raw/` y las respuestas en JSON se deben almacenar en `https://samvpdispensiacr.blob.core.windows.net/dispensia-documents/basedocuments/{project}/results/`.
+
 3. **CSV Global (`HTTP Trigger`, pendiente)**
    - Consolidará las respuestas generadas en un CSV fila a fila. Se implementará después de validar las dos funciones anteriores.
 
