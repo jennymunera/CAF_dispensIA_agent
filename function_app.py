@@ -16,6 +16,9 @@ from src.services.openai_http_client import OpenAIHttpClient
 from src.services.service_bus_dispatcher import ServiceBusDispatcher
 from src.utils.prompt_loader import load_prompt_with_fallback
 
+
+logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
+
 app = func.FunctionApp()
 
 # Configuración de nombres y conexiones
@@ -36,6 +39,9 @@ DEFAULT_CHAINED_PROMPT = load_prompt_with_fallback(
     os.getenv("DEFAULT_CHAINED_PROMPT_FILE"),
     os.getenv("DEFAULT_CHAINED_PROMPT"),
 )
+DOCUMENTS_BASE_PATH = os.getenv("DOCUMENTS_BASE_PATH", "basedocuments")
+RAW_DOCUMENTS_FOLDER = os.getenv("RAW_DOCUMENTS_FOLDER", "raw")
+RESULTS_FOLDER = os.getenv("RESULTS_FOLDER", "results")
 
 INTERNAL_API_BASE_URL = os.getenv("INTERNAL_API_BASE_URL", "http://127.0.0.1:7071/api")
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")
@@ -59,12 +65,19 @@ openai_http_client = OpenAIHttpClient(
     base_url=INTERNAL_API_BASE_URL,
     function_key=INTERNAL_API_KEY,
 )
-dispensas_processor_service = DispensasProcessorService(openai_http_client)
+dispensas_processor_service = DispensasProcessorService(
+    http_client=openai_http_client,
+    blob_repository=blob_repository,
+    base_path=DOCUMENTS_BASE_PATH,
+    results_folder=RESULTS_FOLDER,
+)
 blob_dispatcher_service = BlobDispatcherService(
     blob_repository,
     default_model=DEFAULT_OPENAI_MODEL,
     default_agent_prompt=DEFAULT_AGENT_PROMPT,
     default_chained_prompt=DEFAULT_CHAINED_PROMPT,
+    base_path=DOCUMENTS_BASE_PATH,
+    raw_folder=RAW_DOCUMENTS_FOLDER,
 )
 service_bus_dispatcher = ServiceBusDispatcher(
     connection_string=SERVICE_BUS_CONNECTION_STRING,

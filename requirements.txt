@@ -9,3 +9,4 @@ azure-identity
 azure-servicebus
 openai>=1.0.0
 requests
+pymupdf

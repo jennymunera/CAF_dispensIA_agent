@@ -1,105 +1,119 @@
 # CAF_dispensIA_agent
 
-Este repositorio contiene un único **Azure Function App** llamado `azfunc-MVP-DispensAI` que expone tres funciones (`router`, `dispensas_process` y `csv_global`). Cada handler se registra en `function_app.py` mediante el programming model v2 de Azure Functions, actuando como controller: recibe el trigger, valida parámetros obligatorios (mensajes en español) y delega en servicios especializados ubicados en `src/`.
+Function App que procesa documentos de dispensas del Banco CAF reutilizando Azure Functions y Azure OpenAI. Trabajamos con el programming model v2, por lo que todas las funciones se registran en `function_app.py` y comparten el paquete `src/` para la lógica de negocio.
 
-> **Modelo v2**: no se crean carpetas individuales con `__init__.py` ni `function.json`. Los decoradores `@app.service_bus_queue_trigger`, `@app.route`, etc., generan la configuración automáticamente en tiempo de ejecución.
+> Modelo v2: no generamos carpetas por función ni `function.json` manuales; los decoradores (`@app.route`, `@app.service_bus_queue_trigger`, etc.) producen la configuración durante el build/despliegue.
 
-## Árbol del proyecto con descripciones
+## Árbol del proyecto
 ```
 azfunc-MVP-DispensAI/
-├── .funcignore                  # Exclusiones para despliegues de Azure Functions
-├── .gitignore                   # Archivos y carpetas ignorados por Git
-├── README.md                    # Documento de contexto, arquitectura y plan de trabajo
-├── function_app.py              # Punto de entrada; registra handlers y compone servicios
-├── host.json                    # Configuración global del Function App
-├── local.settings.json          # Variables de entorno para desarrollo local
-├── requirements.txt             # Dependencias de Python del Function App
+├── .funcignore                     # Archivos a excluir en despliegues de Functions
+├── .gitignore                      # Ignorados por git
+├── README.md                       # Este documento de arquitectura y flujo
+├── function_app.py                 # Controllers Azure Functions (HTTP + Service Bus)
+├── host.json                       # Config global del runtime
+├── local.settings.json             # Variables locales (no se versiona en producción)
+├── requirements.txt                # Dependencias Python
 ├── src/
 │   ├── interfaces/
-│   │   └── blob_storage_interface.py    # Contrato abstracto para operaciones contra Blob Storage
+│   │   └── blob_storage_interface.py    # Contrato para repositorios de Blob
 │   ├── models/
-│   │   ├── dispensa_task.py             # Modelo/validador para tareas individuales de procesamiento
-│   │   └── queue_message.py             # Modelo/validador de mensajes de la cola inicial
-│   ├── prompts/                         # Plantillas y prompts (pendiente de poblar)
+│   │   ├── dispensa_task.py             # Modelo de tareas individuales (Service Bus)
+│   │   └── queue_message.py             # Modelo del mensaje de orquestación inicial
+│   ├── prompts/
+│   │   ├── agente_clasificador.txt      # Prompt del agente validador/taxonomía
+│   │   └── agente_extractor.txt         # Prompt del agente extractor de dispensas
 │   ├── repositories/
-│   │   └── blob_storage_repository.py   # Implementación del repositorio de blobs con Azure SDK
+│   │   └── blob_storage_repository.py   # Implementación del repositorio Azure Blob
 │   ├── services/
-│   │   ├── blob_dispatcher.py           # Genera tareas por documento según la solicitud del router
-│   │   ├── dispensas_processor.py       # Orquesta el flujo OpenAI para cada documento
-│   │   ├── notifications_service.py     # Servicio existente para notificaciones externas
-│   │   ├── openai_chained_service.py    # Encapsula la llamada de respuesta encadenada a OpenAI
-│   │   ├── openai_client_factory.py     # Centraliza la autenticación y creación del cliente OpenAI
-│   │   ├── openai_file_service.py       # Gestiona solicitudes con archivo (subida a OpenAI)
-│   │   ├── openai_http_client.py        # Cliente HTTP que invoca las funciones internas de OpenAI
-│   │   └── service_bus_dispatcher.py    # Envía mensajes de tareas a Service Bus
+│   │   ├── blob_dispatcher.py           # Normaliza rutas raw/ y genera DispensaTaskModel
+│   │   ├── dispensas_processor.py       # Invoca APIs internas y guarda resultados en results/
+│   │   ├── notifications_service.py     # Cliente HTTP para notificaciones externas
+│   │   ├── openai_chained_service.py    # Lógica original de chained_request
+│   │   ├── openai_client_factory.py     # Crea clientes OpenAI (API Key / AAD)
+│   │   ├── openai_file_service.py       # Lógica original de request_with_file
+│   │   ├── openai_http_client.py        # Invoca endpoints internos vía HTTP
+│   │   └── service_bus_dispatcher.py    # Envía lotes de tareas a la cola de proceso
 │   └── utils/
-│       ├── blob_url_parser.py           # Extrae contenedor y nombre de blob a partir de la URL
-│       ├── build_email_payload.py       # Utilidad previa para payloads de notificación
-│       ├── content_type.py              # Define filename y content-type basados en la extensión
-│       ├── prompt_loader.py             # Lee prompts desde archivos ubicados en `src/prompts`
-│       └── response_parser.py           # Extrae texto de respuestas OpenAI y convierte a JSON
+│       ├── blob_url_parser.py           # Extrae contenedor/blob de URLs completas
+│       ├── build_email_payload.py       # Helper legado para notificaciones
+│       ├── content_type.py              # Determina filename + content-type según extensión
+│       ├── prompt_loader.py             # Lee prompts desde archivos con fallback
+│       └── response_parser.py           # Extrae texto y parsea JSON de respuestas OpenAI
 └── .vscode/
-    └── settings.json            # Configuración del editor (VS Code)
+    └── settings.json                   # Configuración recomendada para VS Code
 ```
 
-## Detalle de la arquitectura
-- **`function_app.py`**: capa de controllers. Allí se resuelven variables de entorno, se instancian repositorios/servicios y se definen los handlers HTTP y Service Bus. Los endpoints HTTP `request-with-file` y `chained-request` reutilizan la lógica de OpenAI y son consumidos internamente por `dispensas_process`.
-- **Modelos (`src/models/`)**: encapsulan y validan los datos de entrada.
-  - `QueueMessageModel` normaliza el mensaje de Service Bus inicial (proyecto, tipo de disparo, documentos, prompts, modelo).
-  - `DispensaTaskModel` representa la tarea a nivel de documento que consumirá la función `dispensas_process`.
-- **Interfaces y repositorios**: `BlobStorageInterface` define el contrato para trabajar con blobs y `BlobStorageRepository` implementa la lógica con `BlobServiceClient`, incluyendo subir texto/bytes, descargar y listar blobs con logs en español.
-- **Servicios OpenAI**: `OpenAIClientFactory` abstrae la autenticación (API Key o Azure AD). `OpenAIFileService` porta la lógica de `request_with_file` (descargar blob, subir a OpenAI, obtener respuesta). `OpenAIChainedService` encapsula `previous_response_id` para continuar la conversación. `OpenAIHttpClient` llama a los endpoints HTTP internos. `DispensasProcessorService` usa este cliente HTTP para orquestar el flujo de respuestas. `BlobDispatcherService` fan-out de tareas según proyecto/documento. `notifications_service.py` permanece como servicio auxiliar preexistente.
-- **Utilidades (`src/utils/`)**: funciones de apoyo reutilizables (parseo de URL de blob, determinación de content-type, extracción de texto/JSON de OpenAI, payloads de email).
-- **Utilidades (`src/utils/`)**: funciones de apoyo reutilizables (parseo de URL de blob, determinación de content-type, extracción de texto/JSON de OpenAI, lectura de prompts desde archivos, payloads de email).
+## Funciones disponibles
+1. **`request-with-file`** (`HTTP`, anónima por defecto)
+   - Body: `{ prompt, model, blob_url | file_link }`.
+   - Descarga el documento desde Blob Storage, lo sube a Azure OpenAI y devuelve `{response_id, content}` con la respuesta inicial del modelo.
+2. **`chained-request`** (`HTTP`)
+   - Body: `{ prompt, model, previous_response_id }`.
+   - Reutiliza el `response_id` previo para obtener la respuesta encadenada.
+3. **`router`** (`ServiceBusQueueTrigger` sobre `dispensas-router-in`)
+   - Valida `QueueMessageModel`, detecta los blobs a procesar (prefijo `basedocuments/{project}/raw/`) y publica tareas individuales en `dispensas-process-in`.
+4. **`dispensas_process`** (`ServiceBusQueueTrigger` sobre `dispensas-process-in`)
+   - Consume `DispensaTaskModel`, invoca `request-with-file` (el flujo encadenado queda inactivo por ahora), parsea el JSON final y lo persiste en `basedocuments/{project}/results/{documento}.json`.
+5. **`csv_global`** — **pendiente**: se implementará cuando consolidemos todos los JSON en un CSV maestro.
 
-## Flujo de las funciones
-1. **Router (`ServiceBusQueueTrigger`)**
-   - Recibe un mensaje con `project_id`, `trigger_type`, documentos opcionales, modelo y prompts.
-   - Se valida con `QueueMessageModel` (mensajes de error en español).
-   - `BlobDispatcherService` determina qué blobs procesar: todos los del proyecto (`trigger_type = project`) o los documentos específicos (`trigger_type = document`).
-   - Por cada blob genera una tarea (`DispensaTaskModel`) y la envía a la cola de trabajo que activará `dispensas_process`.
+## Flujo end-to-end
+1. **Mensaje de orquestación**
+   - Un Service Bus message incluye `project_id`, `trigger_type` (`project | document`), lista de documentos opcional y overrides de modelo/prompts.
+   - `QueueMessageModel` valida los campos y normaliza strings.
+   - `BlobDispatcherService` arma el prefijo `basedocuments/{project}/raw/`, lista los blobs o normaliza los nombres solicitados y genera un `DispensaTaskModel` por archivo.
+   - `ServiceBusDispatcher` envía cada tarea a `dispensas-process-in`.
+2. **Procesamiento por documento**
+   - `DispensasProcessorService` recibe el task, llama `request-with-file` y `chained-request`, convierte el output a JSON (`parsed_json`) y lo guarda en `basedocuments/{project}/results/{documento}.json`.
+   - El método `process` devuelve un diccionario con metadatos del proyecto/documento, las respuestas intermedias y el JSON final listo para pasos posteriores (notificaciones, agregados, etc.).
+3. **Consolidación (por hacer)**
+   - El flujo actual solo persiste los JSON individuales. La función `csv_global` tomará esos archivos de `results/` y los concatenará en un CSV fila a fila.
 
-2. **Dispensas Process (`ServiceBusQueueTrigger`)**
-   - Consume cada `DispensaTaskModel` de la cola.
-   - `DispensasProcessorService` llama a los endpoints HTTP internos:
-     1. `request-with-file`: prepara el archivo, lo sube a OpenAI y devuelve la respuesta inicial.
-     2. `chained-request`: reutiliza el `response_id` anterior para obtener la respuesta encadenada.
-     3. Convierte el contenido retornado a JSON (`response_parser.parse_json_response`).
-   - Devuelve un diccionario con metadatos del documento, respuestas raw y JSON parseado listo para persistir o publicar.
+## Rutas de almacenamiento
+- **Entrada**: `https://samvpdispensiacr.blob.core.windows.net/dispensia-documents/basedocuments/{project}/raw/`
+- **Salida**:  `https://samvpdispensiacr.blob.core.windows.net/dispensia-documents/basedocuments/{project}/results/`
 
-   Los documentos de entrada por proyecto residen en `https://samvpdispensiacr.blob.core.windows.net/dispensia-documents/basedocuments/{project}/raw/` y las respuestas en JSON se deben almacenar en `https://samvpdispensiacr.blob.core.windows.net/dispensia-documents/basedocuments/{project}/results/`.
+`BlobDispatcherService` y `DispensasProcessorService` parametrizan estos paths con las variables `DOCUMENTS_BASE_PATH`, `RAW_DOCUMENTS_FOLDER` y `RESULTS_FOLDER` para cubrir otros escenarios (por defecto `basedocuments`, `raw`, `results`).
 
-3. **CSV Global (`HTTP Trigger`, pendiente)**
-   - Consolidará las respuestas generadas en un CSV fila a fila. Se implementará después de validar las dos funciones anteriores.
+## Servicios y utilidades clave
+- `OpenAIClientFactory`: crea instancias del SDK OpenAI autenticadas con API Key o Azure AD.
+- `OpenAIFileService` / `OpenAIChainedService`: lógica portada desde el proyecto original (`request_with_file` y `chained_request`). Actualmente `OpenAIFileService` aplica fallback multimodal y persiste resultados; `chained_request` permanece disponible pero no se usa en el flujo automático.
+- `OpenAIHttpClient`: encapsula las llamadas HTTP internas y maneja `x-functions-key` si se protege el endpoint.
+- `BlobDispatcherService`: normaliza rutas, lista blobs y crea tareas `DispensaTaskModel`.
+- `DispensasProcessorService`: orquesta el flujo, parsea el resultado y lo guarda en Blob Storage.
+- `ServiceBusDispatcher`: publica mensajes en la cola de procesamiento.
+- `prompt_loader`: carga prompts desde `src/prompts/*.txt` y permite fallback a variables de entorno.
+- `notifications_service` y `build_email_payload`: utilidades existentes para futuras notificaciones externas.
 
-## Plan de trabajo
-1. **Definir modelos** ✅ — `QueueMessageModel` y `DispensaTaskModel` creados.
-2. **Servicios auxiliares** ✅ — `OpenAIClientFactory`, `OpenAIFileService`, `OpenAIChainedService`, `DispensasProcessorService`, `BlobDispatcherService`, `ServiceBusDispatcher` ya implementados.
-3. **Repositorios/utilidades** ✅ — `BlobStorageRepository` extendido y helpers (`blob_url_parser`, `content_type`, `response_parser`) añadidos.
-4. **Actualizar `function_app.py`** ✅ — Handlers `router` y `dispensas_process` configurados; `csv_global` se implementará más adelante.
-5. **Configurar dependencias** 🔄 — `requirements.txt` actualizado con `azure-identity`, `azure-servicebus`, `openai`, `requests`; pendiente documentar ajustes finales en `local.settings.json` si cambian variables.
-6. **Pruebas iniciales** — Simular mensajes de Service Bus con `azure-functions-core-tools`, validar logs, manejo de errores y resultados.
+## Variables de entorno (local/app settings)
+| Clave | Descripción |
+| --- | --- |
+| `AzureWebJobsStorage` | Storage interno del runtime (Azurite o cuenta real). |
+| `FUNCTIONS_WORKER_RUNTIME` | Mantener en `python`. |
+| `AZURE_STORAGE_CONNECTION_STRING` | Conexión al Storage que contiene los documentos. |
+| `DEFAULT_BLOB_CONTAINER` | Por defecto `dispensia-documents`. |
+| `SERVICE_BUS_CONNECTION` | Conexión con permisos `Send/Listen`. |
+| `ROUTER_QUEUE_NAME`, `PROCESS_QUEUE_NAME` | Colas de entrada y procesamiento (`dispensas-router-in`, `dispensas-process-in`). |
+| `AZURE_OPENAI_ENDPOINT`, `USE_API_KEY`, `AZURE_OPENAI_API_KEY` | Credenciales de Azure OpenAI. |
+| `DEFAULT_OPENAI_MODEL` | Modelo por defecto si el mensaje no lo define. |
+| `DEFAULT_AGENT_PROMPT_FILE`, `DEFAULT_CHAINED_PROMPT_FILE` | Archivos relativos a `src/prompts/` (fallbacks inline: `DEFAULT_AGENT_PROMPT`, `DEFAULT_CHAINED_PROMPT`). |
+| `INTERNAL_API_BASE_URL` | URL del propio Function App para invocar los endpoints HTTP (`http://127.0.0.1:7071/api` en local, `https://<app>.azurewebsites.net/api` en Azure). |
+| `INTERNAL_API_KEY` | Function key (`x-functions-key`) si se protege el endpoint HTTP. |
+| `DOCUMENTS_BASE_PATH`, `RAW_DOCUMENTS_FOLDER`, `RESULTS_FOLDER` | Segmentos de path para raw y results (defaults `basedocuments`, `raw`, `results`). |
 
-### Estado actual de las funciones 1 y 2
-- **Handlers listos**: `router` y `dispensas_process` ya existen en `function_app.py` y delegan en los servicios correspondientes.
-- **Endpoints HTTP**: `request-with-file` y `chained-request` expuestos como API reutilizando la lógica de OpenAI; `dispensas_process` los invoca mediante `OpenAIHttpClient`.
-- **Servicios y utilidades portados**: flujo `request_with_file` y `chained_request` encapsulado en `openai_file_service.py` y `openai_chained_service.py`; fan-out y publicación en Service Bus resuelto con `blob_dispatcher.py` y `service_bus_dispatcher.py`.
-- **Pendiente**:
-  - Actualizar `local.settings.json` (o variables de aplicación) con `SERVICE_BUS_CONNECTION`, `ROUTER_QUEUE_NAME`, `PROCESS_QUEUE_NAME`, `DEFAULT_OPENAI_MODEL`, `DEFAULT_AGENT_PROMPT`, `DEFAULT_CHAINED_PROMPT` y credenciales de Blob/OpenAI.
-  - Instalar dependencias (`pip install -r requirements.txt`).
-  - Ejecutar pruebas locales: enviar un mensaje de ejemplo a `dispensas-router-in`, verificar generación de tareas y procesamiento completo, ajustar logging y manejo de errores según sea necesario.
+## Plan y estado
+1. **Modelos** ✅ — `QueueMessageModel` y `DispensaTaskModel` validados y localizados en `src/models/`.
+2. **Servicios auxiliares** ✅ — Logic de OpenAI, dispatcher de blobs, cliente HTTP y repositorio de Storage implementados.
+3. **Utilidades y prompts** ✅ — Helpers (`blob_url_parser`, `prompt_loader`, etc.) + prompts base en `src/prompts/`.
+4. **Handlers** ✅ — `router`, `dispensas_process`, `request-with-file`, `chained-request` activos; `csv_global` aún por desarrollar.
+5. **Config/Deploy** 🔄 — `requirements.txt` actualizado (`azure-servicebus`, `openai`, `azure-identity`, `requests`). Falta documentar la función CSV y la persistencia adicional si aplica.
+6. **Pruebas** — Ejecutar `func start`, enviar un mensaje de ejemplo a `dispensas-router-in` y confirmar que los JSON terminan en `results/`. (Pendiente de automatización).
 
-## Variables de entorno claves
-- `AZURE_STORAGE_CONNECTION_STRING`, `DEFAULT_BLOB_CONTAINER`: acceso a Blob Storage.
-- `AZURE_OPENAI_ENDPOINT`, `USE_API_KEY`, `AZURE_OPENAI_API_KEY`: autenticación contra Azure OpenAI.
-- `SERVICE_BUS_CONNECTION`: cadena de conexión con permisos para enviar y recibir en las colas.
-- `ROUTER_QUEUE_NAME`, `PROCESS_QUEUE_NAME`: nombres de las colas (por defecto `dispensas-router-in` y `dispensas-process-in`).
-- `DEFAULT_OPENAI_MODEL`, `DEFAULT_AGENT_PROMPT`, `DEFAULT_CHAINED_PROMPT`: valores por defecto utilizados cuando el mensaje de la cola no los especifica.
-- `DEFAULT_AGENT_PROMPT_FILE`, `DEFAULT_CHAINED_PROMPT_FILE`: nombres de archivos (relativos a `src/prompts/`) desde los que se cargarán los prompts; si se omiten, se usan los valores inline anteriores como fallback.
-- `INTERNAL_API_BASE_URL`: URL base del Function App para invocar los endpoints HTTP internos (por defecto `http://127.0.0.1:7071/api` en local).
-- `INTERNAL_API_KEY`: clave opcional (`x-functions-key`) si los endpoints HTTP requieren autenticación (`FUNCTION` o `ADMIN`).
+## Próximos pasos
+1. Implementar `csv_global` para recorrer `results/` y generar el CSV maestro.
+2. Definir persistencia adicional (ej. notificación, índice, almacenamiento en base de datos) reutilizando `notifications_service` si aplica.
+3. Automatizar pruebas end-to-end y/o agregar pipelines de despliegue.
 
-## Referencia cruzada
-- Proyecto base: `/Users/jenny/Downloads/openai_responses_function_app`. De allí se portaron las funcionalidades `request_with_file` y `chained_request`, hoy encapsuladas en `openai_file_service.py` y `openai_chained_service.py`.
-
-Este README se actualizará conforme se implementen los handlers y la función `csv_global`.
+## Referencia
+- Proyecto original: `/Users/jenny/Downloads/openai_responses_function_app` — fuente de `request_with_file` y `chained_request`.
+- Variables sensibles (keys de Storage, Service Bus, OpenAI) deben rotarse/gestionarse mediante App Settings o Key Vault antes de desplegar.
