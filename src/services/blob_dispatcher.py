@@ -66,16 +66,16 @@ class BlobDispatcherService:
         else:
             raise ValueError(f"El tipo de disparo '{message.trigger_type}' no es soportado")
 
-        agent_prompt = self._build_agent_prompt(
-            template=prompt_template,
-            project_key=project_key,
-            extraction_timestamp=extraction_timestamp,
-        )
-
         tasks: List[DispensaTaskModel] = []
         for blob_name in blob_names:
             blob_url = self._build_blob_url(container, blob_name)
             document_name = blob_name.split("/")[-1]
+            agent_prompt = self._build_agent_prompt(
+                template=prompt_template,
+                project_key=project_key,
+                extraction_timestamp=extraction_timestamp,
+                document_name=document_name,
+            )
             tasks.append(
                 DispensaTaskModel(
                     project_id=project_key,
@@ -165,10 +165,12 @@ class BlobDispatcherService:
         template: str,
         project_key: str,
         extraction_timestamp: str,
+        document_name: str,
     ) -> str:
         dynamic_block = (
             "\n\n[Contexto de ejecución]\n"
             f"- Proyecto CAF: {project_key}\n"
             f"- Fecha de extracción (UTC): {extraction_timestamp}\n"
+            f"- Archivo procesado: {document_name}\n"
         )
         return f"{template}{dynamic_block}"
