@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 
 import azure.functions as func
 
@@ -15,6 +16,8 @@ from src.services.openai_file_service import OpenAIFileService
 from src.services.openai_http_client import OpenAIHttpClient
 from src.services.service_bus_dispatcher import ServiceBusDispatcher
 from src.utils.prompt_loader import load_prompt_with_fallback
+from src.services.notifications_service import NotificationsService
+from src.utils.build_email_payload import build_email_payload
 
 
 logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
@@ -45,6 +48,8 @@ RESULTS_FOLDER = os.getenv("RESULTS_FOLDER", "results")
 
 INTERNAL_API_BASE_URL = os.getenv("INTERNAL_API_BASE_URL", "http://127.0.0.1:7071/api")
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")
+NOTIFICATIONS_API_URL_BASE = os.getenv("NOTIFICATIONS_API_URL_BASE")
+SHAREPOINT_FOLDER = os.getenv("SHAREPOINT_FOLDER", "")
 
 if not BLOB_CONNECTION_STRING:
     raise ValueError("La variable 'AZURE_STORAGE_CONNECTION_STRING' es obligatoria")
@@ -64,6 +69,9 @@ openai_chained_service = OpenAIChainedService(openai_client_factory)
 openai_http_client = OpenAIHttpClient(
     base_url=INTERNAL_API_BASE_URL,
     function_key=INTERNAL_API_KEY,
+)
+notifications_service = (
+    NotificationsService(NOTIFICATIONS_API_URL_BASE) if NOTIFICATIONS_API_URL_BASE else None
 )
 dispensas_processor_service = DispensasProcessorService(
     http_client=openai_http_client,
@@ -213,6 +221,25 @@ def router(message: func.ServiceBusMessage) -> None:
     except ValueError as exc:
         logger.error("El mensaje recibido no es válido: %s", exc)
         raise
+
+    # Enviar INFO_START_PROCESS una sola vez por proyecto usando un marcador en Blob Storage
+    try:
+        if notifications_service and queue_message.project_id:
+            marker_blob = f"{DOCUMENTS_BASE_PATH}/{queue_message.project_id}/{RESULTS_FOLDER}/_info_start.json"
+            try:
+                blob_repository.read_item_from_blob(marker_blob)
+                logger.info("INFO_START_PROCESS ya fue enviado para '%s' (marcador presente)", queue_message.project_id)
+            except Exception:
+                payload_info = build_email_payload("INFO_START_PROCESS", queue_message.project_id, SHAREPOINT_FOLDER)
+                notifications_service.send(payload_info)
+                blob_repository.upload_content_to_blob(
+                    content={"status": "info_sent", "timestamp": int(time.time())},
+                    blob_name=marker_blob,
+                    indent_json=True,
+                )
+                logger.info("INFO_START_PROCESS enviado para el proyecto '%s'", queue_message.project_id)
+    except Exception as exc:
+        logger.warning("No se pudo gestionar INFO_START_PROCESS para '%s': %s", queue_message.project_id, exc)
 
     try:
         tasks = blob_dispatcher_service.generate_tasks(queue_message)
