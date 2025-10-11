@@ -4,8 +4,9 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +37,20 @@ class FakeServiceBusMessage:
 
     def get_body(self) -> bytes:
         return self._body
+
+
+def _log_json(level: str, message: str, **extra: Any) -> None:
+    payload: Dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "level": level.upper(),
+        "logger": "router_dispatch_helper",
+        "message": message,
+    }
+    if extra:
+        for key, value in extra.items():
+            if value is not None:
+                payload[key] = value
+    print(json.dumps(payload, ensure_ascii=False))
 
 
 def _load_documents_from_project(project_id: str) -> List[str]:
@@ -73,15 +88,24 @@ def list_all_projects() -> List[str]:
     return sorted(project_ids)
 
 
-def dispatch_project(project_id: str) -> None:
+def dispatch_project(project_id: str, seq: Optional[int] = None, total: Optional[int] = None) -> None:
     payload = {
         "project_id": project_id,
         "trigger_type": "project",
     }
     message = FakeServiceBusMessage(payload)
-    print(f"[INFO] Enviando mensaje para proyecto '{project_id}'")
+    _log_json(
+        "INFO",
+        f"Enviando mensaje para proyecto '{project_id}'",
+        project_id=project_id,
+        sequence=seq,
+        total=total,
+    )
     function_app.router(message)
-    print("[OK] Mensaje procesado por router")
+    if seq is not None and total is not None:
+        print(f"✅ Enviado [{seq}/{total}] proyecto={project_id}")
+    else:
+        print(f"✅ Enviado proyecto={project_id}")
 
 
 def dispatch_document(project_id: str, document_name: str) -> None:
@@ -91,9 +115,28 @@ def dispatch_document(project_id: str, document_name: str) -> None:
         "documents": [document_name],
     }
     message = FakeServiceBusMessage(payload)
-    print(f"[INFO] Enviando mensaje para documento '{document_name}' del proyecto '{project_id}'")
+    _log_json(
+        "INFO",
+        f"Enviando mensaje para documento '{document_name}' del proyecto '{project_id}'",
+        project_id=project_id,
+        document=document_name,
+    )
     function_app.router(message)
-    print("[OK] Mensaje procesado por router")
+    print(f"✅ Enviado documento={document_name} proyecto={project_id}")
+
+
+def _split_delay_args(args: List[str]) -> Tuple[List[str], Optional[int]]:
+    clean_args: List[str] = []
+    delay: Optional[int] = None
+    for arg in args:
+        if arg.startswith("--delay="):
+            try:
+                delay = int(arg.split("=", 1)[1])
+            except ValueError:
+                print(f"[WARN] Valor de delay no válido: {arg}")
+        else:
+            clean_args.append(arg)
+    return clean_args, delay
 
 
 def main(argv: List[str]) -> None:
@@ -103,38 +146,75 @@ def main(argv: List[str]) -> None:
         )
         raise SystemExit(1)
 
-    target = argv[1]
+    raw_args, delay_override = _split_delay_args(argv[1:])
+    if not raw_args:
+        print(
+            "Uso: python3 tests/router_dispatch_helper.py <project_id> [documento] | ALL [--delay=seg]"
+        )
+        raise SystemExit(1)
 
-    # Soporta ejecutar todos los proyectos con un delay configurable (por defecto 180s)
+    target = raw_args[0]
+
+    # Soporta ejecutar todos los proyectos con un delay configurable (por defecto 300s)
     if target.upper() in ("ALL", "*"):
-        delay = int(os.getenv("DISPATCH_DELAY_SECONDS", "180"))
-        # Permite override vía flag --delay=segundos
-        for arg in argv[2:]:
-            if arg.startswith("--delay="):
-                try:
-                    delay = int(arg.split("=", 1)[1])
-                except ValueError:
-                    print(f"[WARN] Valor de delay no válido: {arg}")
+        delay = delay_override or int(os.getenv("DISPATCH_DELAY_SECONDS", "300"))
         projects = list_all_projects()
         if not projects:
             print("[INFO] No se encontraron proyectos en Blob Storage bajo DOCUMENTS_BASE_PATH/raw")
             return
-        print(f"[INFO] Se encontraron {len(projects)} proyectos. Delay entre envíos: {delay}s")
+        _log_json("INFO", f"Proyectos encontrados: {projects}", count=len(projects))
+        print(f"🔎 Proyectos a enviar: {len(projects)} -> {projects}")
+
+        total = len(projects)
+        sent = 0
+        queue_name = getattr(function_app, "ROUTER_QUEUE_NAME", "dispensas-router-in")
+
+        print(f"⏱️ Intervalo entre envíos: {delay} segundos")
         for idx, project_id in enumerate(projects, start=1):
-            print(f"[RUN {idx}/{len(projects)}] Proyecto: {project_id}")
-            dispatch_project(project_id)
-            if idx < len(projects):
-                print(f"[SLEEP] Esperando {delay} segundos antes del siguiente proyecto...")
+            print(f"🚀 Procesando [{idx}/{total}] proyecto={project_id}")
+            dispatch_project(project_id, idx, total)
+            sent += 1
+            if idx < total:
+                print(f"⏳ Esperando {delay} segundos antes del siguiente proyecto...")
                 time.sleep(delay)
-        print("[DONE] Envío de proyectos completado")
+        print("📦 Cola:", queue_name)
+        print(f"📊 Mensajes enviados: {sent}/{total}")
+        print("✅ Envío de proyectos completado")
         return
 
     # Caso por proyecto o documento específico
+    remaining = raw_args[1:]
+
+    # Opción documento (formato original: script.py <project> <documento>)
+    if len(remaining) == 1 and (("." in remaining[0]) or ("/" in remaining[0])):
+        dispatch_document(target, remaining[0])
+        return
+
+    # Múltiples proyectos proporcionados manualmente
+    if remaining:
+        projects = [target, *remaining]
+        delay = delay_override or int(os.getenv("DISPATCH_DELAY_SECONDS", "300"))
+        _log_json("INFO", f"Proyectos recibidos manualmente: {projects}", count=len(projects))
+        print(f"🔎 Proyectos a enviar: {len(projects)} -> {projects}")
+        print(f"⏱️ Intervalo entre envíos: {delay} segundos")
+        queue_name = getattr(function_app, "ROUTER_QUEUE_NAME", "dispensas-router-in")
+        for idx, project_id in enumerate(projects, start=1):
+            print(f"🚀 Procesando [{idx}/{len(projects)}] proyecto={project_id}")
+            dispatch_project(project_id, idx, len(projects))
+            if idx < len(projects):
+                print(f"⏳ Esperando {delay} segundos antes del siguiente proyecto...")
+                time.sleep(delay)
+        print("📦 Cola:", queue_name)
+        print(f"📊 Mensajes enviados: {len(projects)}/{len(projects)}")
+        print("✅ Envío de proyectos completado")
+        return
+
+    # Proyecto único
     project = target
-    if len(argv) == 2:
+    if not remaining:
         dispatch_project(project)
     else:
-        dispatch_document(project, argv[2])
+        dispatch_document(project, remaining[0])
 
 
 if __name__ == "__main__":

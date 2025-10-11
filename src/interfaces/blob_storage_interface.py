@@ -6,7 +6,7 @@ class BlobStorageInterface(ABC):
     @abstractmethod
     def upload_content_to_blob(
         self,
-        content: Union[str, dict],
+        content: Union[str, dict, list],
         blob_name: str,
         container_name: str = "",
         indent_json: bool = True
@@ -40,4 +40,12 @@ class BlobStorageInterface(ABC):
         prefix: str = "",
         container_name: str = ""
     ) -> List[str]:
+        pass
+
+    @abstractmethod
+    def delete_blob(
+        self,
+        blob_name: str,
+        container_name: str = ""
+    ) -> None:
         pass

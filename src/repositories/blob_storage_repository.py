@@ -15,7 +15,7 @@ class BlobStorageRepository(BlobStorageInterface):
 
     def upload_content_to_blob(
         self,
-        content: Union[str, dict],
+        content: Union[str, dict, list],
         blob_name: str,
         container_name: str = "",
         indent_json: bool = True
@@ -24,8 +24,10 @@ class BlobStorageRepository(BlobStorageInterface):
         try:
             container = container_name or self.default_container
 
-            if isinstance(content, dict):
+            if isinstance(content, (dict, list)):
                 content = json.dumps(content, ensure_ascii=False, indent=2 if indent_json else None)
+            elif not isinstance(content, str):
+                content = str(content)
 
             content_bytes = content.encode("utf-8")
             blob_client = self.blob_service_client.get_blob_client(container=container, blob=blob_name)
@@ -115,4 +117,27 @@ class BlobStorageRepository(BlobStorageInterface):
             raise
         except Exception as exc:
             logging.exception("Error inesperado en list_blobs: %s", exc)
+            raise
+
+    def delete_blob(
+        self,
+        blob_name: str,
+        container_name: str = ""
+    ) -> None:
+        try:
+            container = container_name or self.default_container
+            blob_client = self.blob_service_client.get_blob_client(container=container, blob=blob_name)
+            blob_client.delete_blob()
+        except ResourceNotFoundError:
+            logging.debug("Se intentó eliminar el blob inexistente '%s' en '%s'", blob_name, container)
+        except AzureError as exc:
+            logging.error(
+                "Error eliminando el blob '%s' en el contenedor '%s': %s",
+                blob_name,
+                container,
+                exc,
+            )
+            raise
+        except Exception as exc:
+            logging.exception("Error inesperado en delete_blob: %s", exc)
             raise

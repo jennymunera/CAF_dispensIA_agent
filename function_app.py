@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import time
 
 import azure.functions as func
 
@@ -15,9 +14,9 @@ from src.services.openai_client_factory import OpenAIClientFactory
 from src.services.openai_file_service import OpenAIFileService
 from src.services.openai_http_client import OpenAIHttpClient
 from src.services.service_bus_dispatcher import ServiceBusDispatcher
-from src.utils.prompt_loader import load_prompt_with_fallback
 from src.services.notifications_service import NotificationsService
-from src.utils.build_email_payload import build_email_payload
+from src.utils.prompt_loader import load_prompt_with_fallback
+from src.services.processor_csv_service import process_dispensia_json_to_csv
 
 
 logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
@@ -48,8 +47,20 @@ RESULTS_FOLDER = os.getenv("RESULTS_FOLDER", "results")
 
 INTERNAL_API_BASE_URL = os.getenv("INTERNAL_API_BASE_URL", "http://127.0.0.1:7071/api")
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")
+try:
+    INTERNAL_API_TIMEOUT = int(os.getenv("INTERNAL_API_TIMEOUT", "300"))
+except (TypeError, ValueError):
+    INTERNAL_API_TIMEOUT = 300
 NOTIFICATIONS_API_URL_BASE = os.getenv("NOTIFICATIONS_API_URL_BASE")
 SHAREPOINT_FOLDER = os.getenv("SHAREPOINT_FOLDER", "")
+
+AZURE_STORAGE_OUTPUT_CONNECTION_STRING = os.environ["AZURE_STORAGE_OUTPUT_CONNECTION_STRING"]
+CONTAINER_OUTPUT_NAME = os.environ["CONTAINER_OUTPUT_NAME"]  
+NOTIFICATION_API_URL = os.environ["NOTIFICATIONS_API_URL_BASE"]
+FILENAME_CSV = os.environ["FILENAME_CSV"]
+FILENAME_JSON = os.environ["FILENAME_JSON"]
+FOLDER_OUTPUT = os.environ["FOLDER_OUTPUT"]
+FOLDER_BASE_DOCUMENTS = os.environ["FOLDER_BASE_DOCUMENTS"]
 
 if not BLOB_CONNECTION_STRING:
     raise ValueError("La variable 'AZURE_STORAGE_CONNECTION_STRING' es obligatoria")
@@ -69,15 +80,10 @@ openai_chained_service = OpenAIChainedService(openai_client_factory)
 openai_http_client = OpenAIHttpClient(
     base_url=INTERNAL_API_BASE_URL,
     function_key=INTERNAL_API_KEY,
+    timeout=INTERNAL_API_TIMEOUT,
 )
 notifications_service = (
     NotificationsService(NOTIFICATIONS_API_URL_BASE) if NOTIFICATIONS_API_URL_BASE else None
-)
-dispensas_processor_service = DispensasProcessorService(
-    http_client=openai_http_client,
-    blob_repository=blob_repository,
-    base_path=DOCUMENTS_BASE_PATH,
-    results_folder=RESULTS_FOLDER,
 )
 blob_dispatcher_service = BlobDispatcherService(
     blob_repository,
@@ -90,6 +96,17 @@ blob_dispatcher_service = BlobDispatcherService(
 service_bus_dispatcher = ServiceBusDispatcher(
     connection_string=SERVICE_BUS_CONNECTION_STRING,
     queue_name=PROCESS_QUEUE_NAME,
+)
+dispensas_processor_service = DispensasProcessorService(
+    http_client=openai_http_client,
+    blob_repository=blob_repository,
+    base_path=DOCUMENTS_BASE_PATH,
+    results_folder=RESULTS_FOLDER,
+    notifications_service=notifications_service,
+    sharepoint_folder=SHAREPOINT_FOLDER,
+    raw_folder=RAW_DOCUMENTS_FOLDER,
+    blob_dispatcher=blob_dispatcher_service,
+    service_bus_dispatcher=service_bus_dispatcher,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,6 +166,8 @@ def request_with_file_http(req: func.HttpRequest) -> func.HttpResponse:
             status_code=500,
             mimetype="application/json",
         )
+
+
 
 
 @app.function_name(name="chained_request")
@@ -222,25 +241,6 @@ def router(message: func.ServiceBusMessage) -> None:
         logger.error("El mensaje recibido no es válido: %s", exc)
         raise
 
-    # Enviar INFO_START_PROCESS una sola vez por proyecto usando un marcador en Blob Storage
-    try:
-        if notifications_service and queue_message.project_id:
-            marker_blob = f"{DOCUMENTS_BASE_PATH}/{queue_message.project_id}/{RESULTS_FOLDER}/_info_start.json"
-            try:
-                blob_repository.read_item_from_blob(marker_blob)
-                logger.info("INFO_START_PROCESS ya fue enviado para '%s' (marcador presente)", queue_message.project_id)
-            except Exception:
-                payload_info = build_email_payload("INFO_START_PROCESS", queue_message.project_id, SHAREPOINT_FOLDER)
-                notifications_service.send(payload_info)
-                blob_repository.upload_content_to_blob(
-                    content={"status": "info_sent", "timestamp": int(time.time())},
-                    blob_name=marker_blob,
-                    indent_json=True,
-                )
-                logger.info("INFO_START_PROCESS enviado para el proyecto '%s'", queue_message.project_id)
-    except Exception as exc:
-        logger.warning("No se pudo gestionar INFO_START_PROCESS para '%s': %s", queue_message.project_id, exc)
-
     try:
         tasks = blob_dispatcher_service.generate_tasks(queue_message)
     except Exception as exc:  # pragma: no cover - el runtime reintentará el mensaje
@@ -286,3 +286,41 @@ def dispensas_process(message: func.ServiceBusMessage) -> None:
     )
     logger.debug("Respuesta encadenada: %s", result["chained_response"])
     logger.debug("JSON parseado: %s", result["parsed_json"])
+
+@app.function_name(name="json_to_csv_request")
+@app.route(route="json_to_csv_request", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def json_to_csv_request_http(req: func.HttpRequest) -> func.HttpResponse:
+    logger.info("Procesando solicitud HTTP json_to_csv_request")
+    try:
+        payload = req.get_json()
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({"error": "El cuerpo de la petición debe ser un JSON válido"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    try:
+        input_path = f"{FOLDER_BASE_DOCUMENTS}/{payload.get('project_id')}/results/{FILENAME_JSON}"
+        output_path = f"{FOLDER_OUTPUT}/{FILENAME_CSV}"
+
+        process_dispensia_json_to_csv(
+            AZURE_STORAGE_OUTPUT_CONNECTION_STRING,
+            CONTAINER_OUTPUT_NAME,
+            input_path,
+            output_path
+        )
+
+        print(payload.get("project_id"))
+        return func.HttpResponse(
+            json.dumps(payload, ensure_ascii=False),
+            status_code=200,
+            mimetype="application/json",
+        )
+    except Exception as exc:
+        logger.exception("Error en json_to_csv_request: %s", exc)
+        return func.HttpResponse(
+            json.dumps({"error": str(exc)}),
+            status_code=500,
+            mimetype="application/json",
+        )

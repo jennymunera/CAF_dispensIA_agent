@@ -36,14 +36,35 @@ class OpenAIFileService:
         client = self._client_factory.create_client()
         temp_file_path = ""
         uploaded_file_id = None
+        upload_attempts = 3
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
                 temp_file.write(blob_bytes)
                 temp_file_path = temp_file.name
 
-            with open(temp_file_path, "rb") as file_handle:
-                uploaded_file = client.files.create(file=file_handle, purpose="assistants")
-                uploaded_file_id = uploaded_file.id
+            for attempt in range(1, upload_attempts + 1):
+                try:
+                    with open(temp_file_path, "rb") as file_handle:
+                        uploaded_file = client.files.create(file=file_handle, purpose="assistants")
+                        uploaded_file_id = uploaded_file.id
+                    break
+                except Exception as upload_exc:
+                    if attempt >= upload_attempts:
+                        _LOGGER.error(
+                            "Falló la subida del archivo a OpenAI tras %s intentos para '%s'",
+                            upload_attempts,
+                            blob_name,
+                        )
+                        raise upload_exc
+                    wait_time = min(2 * attempt, 10)
+                    _LOGGER.warning(
+                        "Error subiendo archivo a OpenAI (intento %s/%s) para '%s'. Reintentando en %s segundos",
+                        attempt,
+                        upload_attempts,
+                        blob_name,
+                        wait_time,
+                    )
+                    time.sleep(wait_time)
 
             response = client.responses.create(
                 model=model,
@@ -86,8 +107,31 @@ class OpenAIFileService:
                 )
 
             return result
-        except Exception:
+        except Exception as exc:
             _LOGGER.exception("Error al procesar la solicitud con archivo para el blob '%s'", blob_name)
+            if uploaded_file_id:
+                try:
+                    client.files.delete(uploaded_file_id)
+                except Exception:
+                    _LOGGER.warning(
+                        "No se pudo eliminar el archivo temporal de OpenAI con id '%s'", uploaded_file_id
+                    )
+                uploaded_file_id = None
+            if str(exc).lower().startswith("error code: 500"):
+                _LOGGER.info(
+                    "Fallo subida de archivo para '%s' con error 500; intentando fallback con modelo de visión",
+                    blob_name,
+                )
+                vision_result = None
+                try:
+                    vision_result = self._try_with_images(blob_bytes, prompt)
+                except Exception:
+                    _LOGGER.exception(
+                        "Falló el fallback con modelo de visión tras error 500 para '%s'",
+                        blob_name,
+                    )
+                if vision_result:
+                    return vision_result
             raise
         finally:
             if uploaded_file_id:
