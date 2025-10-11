@@ -44,6 +44,7 @@ class DispensasProcessorService:
         self._blob_dispatcher = blob_dispatcher
         self._service_bus_dispatcher = service_bus_dispatcher
         self._requeued_documents: Dict[str, Set[str]] = defaultdict(set)
+        self._error_notified: Set[str] = set()
 
     def process(self, task: DispensaTaskModel) -> Dict[str, Any]:
         _LOGGER.info(
@@ -51,7 +52,6 @@ class DispensasProcessorService:
             task.project_id,
             task.document_name,
         )
-        self._maybe_notify_project_start(task.project_id)
         try:
             initial_response = self._http_client.request_with_file(
                 blob_url=task.blob_url,
@@ -291,8 +291,6 @@ class DispensasProcessorService:
             len(result_stems),
             len(missing),
         )
-        if missing:
-            self._requeue_missing_documents(task, missing)
         return len(missing) == 0
 
     def _blob_exists(self, blob_name: str) -> bool:
@@ -363,80 +361,6 @@ class DispensasProcessorService:
                     blob_name,
                     task.project_id,
                 )
-
-    def _requeue_missing_documents(self, task: DispensaTaskModel, missing_stems: Set[str]) -> None:
-        if not self._blob_dispatcher or not self._service_bus_dispatcher:
-            return
-
-        project_id = (task.project_id or "").strip("/")
-        if not project_id:
-            return
-
-        already_requeued = self._requeued_documents[project_id]
-        stems_to_requeue = [stem for stem in missing_stems if stem not in already_requeued]
-        if not stems_to_requeue:
-            return
-
-        raw_prefix = self._build_raw_prefix(task)
-        container = self._blob_repository.default_container
-        try:
-            raw_blobs = self._blob_repository.list_blobs(
-                prefix=f"{raw_prefix.rstrip('/')}/",
-                container_name=container,
-            )
-        except Exception:
-            _LOGGER.exception(
-                "No se pudo listar blobs raw para reencolar pendientes del proyecto '%s'",
-                project_id,
-            )
-            return
-
-        stem_to_blob: Dict[str, str] = {}
-        for blob_name in raw_blobs:
-            normalized = self._normalize_stem(blob_name)
-            stem_to_blob[normalized] = blob_name
-
-        documents_to_dispatch: List[str] = []
-        for stem in stems_to_requeue:
-            blob_name = stem_to_blob.get(stem)
-            if blob_name:
-                documents_to_dispatch.append(blob_name)
-            else:
-                _LOGGER.warning(
-                    "No se encontró blob raw para el documento pendiente '%s' del proyecto '%s'",
-                    stem,
-                    project_id,
-                )
-
-        if not documents_to_dispatch:
-            return
-
-        payload = {
-            "project_id": project_id,
-            "trigger_type": "document",
-            "documents": documents_to_dispatch,
-            "model": task.model,
-            "chained_prompt": task.chained_prompt,
-        }
-
-        try:
-            queue_message = QueueMessageModel.from_dict(payload)
-            tasks = self._blob_dispatcher.generate_tasks(queue_message)
-            if tasks:
-                sent = self._service_bus_dispatcher.send_tasks(tasks)
-                if sent:
-                    already_requeued.update(stems_to_requeue)
-                    _LOGGER.info(
-                        "Se reencolaron %s documentos pendientes para el proyecto '%s': %s",
-                        sent,
-                        project_id,
-                        documents_to_dispatch,
-                    )
-        except Exception:
-            _LOGGER.exception(
-                "No se pudieron reencolar documentos pendientes para el proyecto '%s'",
-                project_id,
-            )
 
     def _maybe_generate_csv(self, task: DispensaTaskModel) -> None:
         project_id = (task.project_id or "").strip("/")
@@ -524,25 +448,33 @@ class DispensasProcessorService:
         self._send_notification("SUCCESS_FINALLY_PROCESS", process_name)
 
     def _notify_error(self, task: DispensaTaskModel, exc: Exception) -> None:
-        if not self._notifications_service:
-            return
+        key = f"{task.project_id}|{task.document_name}".strip()
+        if key in self._error_notified:
+            _LOGGER.debug(
+                "Notificación de error ya enviada previamente para '%s'; se omite duplicado",
+                key,
+            )
+        else:
+            if self._notifications_service:
+                process_name = f"{task.project_id} | {task.document_name}"
+                try:
+                    payload = build_email_payload("ERROR_FINALLY_PROCESS", process_name, self._sharepoint_folder)
+                    payload["data"].append({"label": "{{error}}", "value": str(exc)})
+                    self._notifications_service.send(payload)
+                    _LOGGER.info(
+                        "Notificación de error enviada para el proyecto '%s', documento '%s'",
+                        task.project_id,
+                        task.document_name,
+                    )
+                except Exception:
+                    _LOGGER.exception(
+                        "No se pudo enviar la notificación de error para el proyecto '%s', documento '%s'",
+                        task.project_id,
+                        task.document_name,
+                    )
+            self._error_notified.add(key)
 
-        process_name = f"{task.project_id} | {task.document_name}"
-        try:
-            payload = build_email_payload("ERROR_FINALLY_PROCESS", process_name, self._sharepoint_folder)
-            payload["data"].append({"label": "{{error}}", "value": str(exc)})
-            self._notifications_service.send(payload)
-            _LOGGER.info(
-                "Notificación de error enviada para el proyecto '%s', documento '%s'",
-                task.project_id,
-                task.document_name,
-            )
-        except Exception:
-            _LOGGER.exception(
-                "No se pudo enviar la notificación de error para el proyecto '%s', documento '%s'",
-                task.project_id,
-                task.document_name,
-            )
+        self._requeue_document(task)
 
     def _notify_csv_success(self, project_id: str) -> None:
         """Envía notificación de éxito cuando se genera el CSV para un proyecto."""

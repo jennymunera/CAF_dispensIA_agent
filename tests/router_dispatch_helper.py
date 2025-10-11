@@ -8,8 +8,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from azure.storage.blob import BlobServiceClient
+
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _debug(message: str, **extra: Any) -> None:
+    # Depuración deshabilitada; mantener por compatibilidad con llamadas existentes.
+    return
 
 
 def _load_local_settings() -> Dict[str, str]:
@@ -19,6 +26,7 @@ def _load_local_settings() -> Dict[str, str]:
     except FileNotFoundError:
         return {}
     values = data.get("Values", {})
+    _debug(f"local.settings.json detectado con {len(values)} claves", keys=list(values.keys()))
     return {key: str(value) for key, value in values.items()}
 
 
@@ -56,14 +64,12 @@ def _log_json(level: str, message: str, **extra: Any) -> None:
 def _load_documents_from_project(project_id: str) -> List[str]:
     connection = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
     container = os.environ["DEFAULT_BLOB_CONTAINER"]
-
-    from azure.storage.blob import BlobServiceClient
-
     client = BlobServiceClient.from_connection_string(connection)
     container_client = client.get_container_client(container)
-
     prefix = f"basedocuments/{project_id.strip('/')}/raw/"
-    return [blob.name for blob in container_client.list_blobs(name_starts_with=prefix)]
+    names = [blob.name for blob in container_client.list_blobs(name_starts_with=prefix)]
+    _debug("Documentos listados para proyecto", project_id=project_id, total=len(names))
+    return names
 
 
 def list_all_projects() -> List[str]:
@@ -72,8 +78,6 @@ def list_all_projects() -> List[str]:
     container = os.environ["DEFAULT_BLOB_CONTAINER"]
     base_path = os.getenv("DOCUMENTS_BASE_PATH", "basedocuments").strip("/")
     raw_folder = os.getenv("RAW_DOCUMENTS_FOLDER", "raw").strip("/")
-
-    from azure.storage.blob import BlobServiceClient
 
     client = BlobServiceClient.from_connection_string(connection)
     container_client = client.get_container_client(container)
@@ -85,7 +89,9 @@ def list_all_projects() -> List[str]:
         parts = blob.name.split("/")
         if len(parts) >= 3 and parts[0] == base_path and parts[2] == raw_folder:
             project_ids.add(parts[1])
-    return sorted(project_ids)
+    projects = sorted(project_ids)
+    _debug("Proyectos detectados en storage", total=len(projects), projects=projects)
+    return projects
 
 
 def dispatch_project(project_id: str, seq: Optional[int] = None, total: Optional[int] = None) -> None:
@@ -93,6 +99,7 @@ def dispatch_project(project_id: str, seq: Optional[int] = None, total: Optional
         "project_id": project_id,
         "trigger_type": "project",
     }
+    _debug("Payload project", payload=payload)
     message = FakeServiceBusMessage(payload)
     _log_json(
         "INFO",
@@ -114,6 +121,7 @@ def dispatch_document(project_id: str, document_name: str) -> None:
         "trigger_type": "document",
         "documents": [document_name],
     }
+    _debug("Payload document", payload=payload)
     message = FakeServiceBusMessage(payload)
     _log_json(
         "INFO",
@@ -136,6 +144,7 @@ def _split_delay_args(args: List[str]) -> Tuple[List[str], Optional[int]]:
                 print(f"[WARN] Valor de delay no válido: {arg}")
         else:
             clean_args.append(arg)
+    _debug("Argumentos procesados", clean_args=clean_args, delay=delay)
     return clean_args, delay
 
 
@@ -154,6 +163,7 @@ def main(argv: List[str]) -> None:
         raise SystemExit(1)
 
     target = raw_args[0]
+    _debug("Target principal", target=target, args=raw_args, delay_override=delay_override)
 
     # Soporta ejecutar todos los proyectos con un delay configurable (por defecto 300s)
     if target.upper() in ("ALL", "*"):
@@ -172,6 +182,7 @@ def main(argv: List[str]) -> None:
         print(f"⏱️ Intervalo entre envíos: {delay} segundos")
         for idx, project_id in enumerate(projects, start=1):
             print(f"🚀 Procesando [{idx}/{total}] proyecto={project_id}")
+            _debug("Disparando proyecto (modo ALL)", index=idx, total=total, project_id=project_id, delay=delay)
             dispatch_project(project_id, idx, total)
             sent += 1
             if idx < total:
@@ -200,6 +211,7 @@ def main(argv: List[str]) -> None:
         queue_name = getattr(function_app, "ROUTER_QUEUE_NAME", "dispensas-router-in")
         for idx, project_id in enumerate(projects, start=1):
             print(f"🚀 Procesando [{idx}/{len(projects)}] proyecto={project_id}")
+            _debug("Disparando proyecto (lista manual)", index=idx, total=len(projects), project_id=project_id, delay=delay)
             dispatch_project(project_id, idx, len(projects))
             if idx < len(projects):
                 print(f"⏳ Esperando {delay} segundos antes del siguiente proyecto...")
@@ -212,8 +224,10 @@ def main(argv: List[str]) -> None:
     # Proyecto único
     project = target
     if not remaining:
+        _debug("Modo proyecto único sin documentos adicionales", project=project)
         dispatch_project(project)
     else:
+        _debug("Modo documento específico", project=project, document=remaining[0])
         dispatch_document(project, remaining[0])
 
 
