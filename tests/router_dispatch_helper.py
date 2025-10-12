@@ -95,24 +95,37 @@ def list_all_projects() -> List[str]:
 
 
 def dispatch_project(project_id: str, seq: Optional[int] = None, total: Optional[int] = None) -> None:
-    payload = {
-        "project_id": project_id,
-        "trigger_type": "project",
-    }
-    _debug("Payload project", payload=payload)
-    message = FakeServiceBusMessage(payload)
+    documents = _load_documents_from_project(project_id)
     _log_json(
         "INFO",
-        f"Enviando mensaje para proyecto '{project_id}'",
+        f"Enviando proyecto '{project_id}' con {len(documents)} documentos",
         project_id=project_id,
         sequence=seq,
         total=total,
+        document_count=len(documents),
     )
-    function_app.router(message)
+
+    if not documents:
+        print(f"⚠️ Proyecto {project_id} sin documentos en raw/")
+        return
+
+    per_document_delay = int(os.getenv("DOCUMENT_DELAY_SECONDS", "5"))
+    for index, document in enumerate(documents, start=1):
+        _debug(
+            "Despachando documento individual",
+            project_id=project_id,
+            document=document,
+            document_index=index,
+            document_total=len(documents),
+        )
+        dispatch_document(project_id, document)
+        if index < len(documents) and per_document_delay > 0:
+            time.sleep(per_document_delay)
+
     if seq is not None and total is not None:
-        print(f"✅ Enviado [{seq}/{total}] proyecto={project_id}")
+        print(f"✅ Enviado [{seq}/{total}] proyecto={project_id} ({len(documents)} documentos)")
     else:
-        print(f"✅ Enviado proyecto={project_id}")
+        print(f"✅ Enviado proyecto={project_id} ({len(documents)} documentos)")
 
 
 def dispatch_document(project_id: str, document_name: str) -> None:
@@ -123,29 +136,30 @@ def dispatch_document(project_id: str, document_name: str) -> None:
     }
     _debug("Payload document", payload=payload)
     message = FakeServiceBusMessage(payload)
-    _log_json(
-        "INFO",
-        f"Enviando mensaje para documento '{document_name}' del proyecto '{project_id}'",
-        project_id=project_id,
-        document=document_name,
-    )
     function_app.router(message)
-    print(f"✅ Enviado documento={document_name} proyecto={project_id}")
 
 
-def _split_delay_args(args: List[str]) -> Tuple[List[str], Optional[int]]:
+def _split_delay_args(args: List[str]) -> Tuple[List[str], Optional[int], List[str]]:
     clean_args: List[str] = []
     delay: Optional[int] = None
+    excluded: List[str] = []
     for arg in args:
         if arg.startswith("--delay="):
             try:
                 delay = int(arg.split("=", 1)[1])
             except ValueError:
                 print(f"[WARN] Valor de delay no válido: {arg}")
+        elif arg.startswith("--except=") or arg.startswith("--exclude="):
+            _, value = arg.split("=", 1)
+            candidate = value.strip()
+            if candidate:
+                excluded.append(candidate)
+        elif arg.startswith("--except") or arg.startswith("--exclude"):
+            print(f"[WARN] Se esperaba formato --except=PROYECTO, argumento ignorado: {arg}")
         else:
             clean_args.append(arg)
-    _debug("Argumentos procesados", clean_args=clean_args, delay=delay)
-    return clean_args, delay
+    _debug("Argumentos procesados", clean_args=clean_args, delay=delay, excluded=excluded)
+    return clean_args, delay, excluded
 
 
 def main(argv: List[str]) -> None:
@@ -155,7 +169,7 @@ def main(argv: List[str]) -> None:
         )
         raise SystemExit(1)
 
-    raw_args, delay_override = _split_delay_args(argv[1:])
+    raw_args, delay_override, excluded = _split_delay_args(argv[1:])
     if not raw_args:
         print(
             "Uso: python3 tests/router_dispatch_helper.py <project_id> [documento] | ALL [--delay=seg]"
@@ -168,10 +182,15 @@ def main(argv: List[str]) -> None:
     # Soporta ejecutar todos los proyectos con un delay configurable (por defecto 300s)
     if target.upper() in ("ALL", "*"):
         delay = delay_override or int(os.getenv("DISPATCH_DELAY_SECONDS", "300"))
-        projects = list_all_projects()
+        projects = [p for p in list_all_projects() if p not in excluded]
         if not projects:
-            print("[INFO] No se encontraron proyectos en Blob Storage bajo DOCUMENTS_BASE_PATH/raw")
+            if excluded:
+                print("[INFO] No hay proyectos para procesar después de aplicar las exclusiones.")
+            else:
+                print("[INFO] No se encontraron proyectos en Blob Storage bajo DOCUMENTS_BASE_PATH/raw")
             return
+        if excluded:
+            _log_json("INFO", "Proyectos excluidos", excluded=excluded)
         _log_json("INFO", f"Proyectos encontrados: {projects}", count=len(projects))
         print(f"🔎 Proyectos a enviar: {len(projects)} -> {projects}")
 
@@ -203,8 +222,14 @@ def main(argv: List[str]) -> None:
 
     # Múltiples proyectos proporcionados manualmente
     if remaining:
-        projects = [target, *remaining]
+        projects = [p for p in [target, *remaining] if p not in excluded]
         delay = delay_override or int(os.getenv("DISPATCH_DELAY_SECONDS", "300"))
+        if not projects:
+            if excluded:
+                print("[INFO] Todos los proyectos proporcionados quedaron excluidos.")
+            else:
+                print("[INFO] No se proporcionaron proyectos válidos para procesar.")
+            return
         _log_json("INFO", f"Proyectos recibidos manualmente: {projects}", count=len(projects))
         print(f"🔎 Proyectos a enviar: {len(projects)} -> {projects}")
         print(f"⏱️ Intervalo entre envíos: {delay} segundos")
@@ -223,6 +248,9 @@ def main(argv: List[str]) -> None:
 
     # Proyecto único
     project = target
+    if project in excluded:
+        print(f"[INFO] Proyecto '{project}' está en la lista de exclusión. No se enviará.")
+        return
     if not remaining:
         _debug("Modo proyecto único sin documentos adicionales", project=project)
         dispatch_project(project)
