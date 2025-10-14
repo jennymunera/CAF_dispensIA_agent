@@ -47,22 +47,6 @@ import azure.functions as func  # type: ignore
 import function_app
 
 
-class FakeOpenAIFileService:
-    def __init__(self) -> None:
-        self.last_call = None
-
-    def send_request_with_file(self, blob_url: str, prompt: str, model: str) -> dict:
-        self.last_call = {
-            "blob_url": blob_url,
-            "prompt": prompt,
-            "model": model,
-        }
-        return {
-            "response_id": "file-response-123",
-            "content": "Archivo procesado correctamente",
-        }
-
-
 class FakeOpenAIChainedService:
     def __init__(self) -> None:
         self.last_call = None
@@ -117,13 +101,11 @@ class FakeDispensasProcessorService:
 
 
 # Inyección de dobles en function_app para aislar dependencias externas.
-fake_file_service = FakeOpenAIFileService()
 fake_chained_service = FakeOpenAIChainedService()
 fake_blob_dispatcher = FakeBlobDispatcherService()
 fake_service_bus_dispatcher = FakeServiceBusDispatcher()
 fake_dispensas_processor = FakeDispensasProcessorService()
 
-function_app.openai_file_service = fake_file_service
 function_app.openai_chained_service = fake_chained_service
 function_app.blob_dispatcher_service = fake_blob_dispatcher
 function_app.service_bus_dispatcher = fake_service_bus_dispatcher
@@ -132,44 +114,6 @@ function_app.dispensas_processor_service = fake_dispensas_processor
 
 def _decode_json_response(response: func.HttpResponse) -> dict:
     return json.loads(response.get_body().decode("utf-8"))
-
-
-def test_request_with_file_rejects_invalid_json() -> None:
-    request = func.HttpRequest(
-        method="POST",
-        url="http://localhost/request-with-file",
-        headers={},
-        params={},
-        body=b"not-json",
-    )
-
-    response = function_app.request_with_file_http(request)
-
-    assert response.status_code == 400, "Debe rechazar cuerpos que no sean JSON"
-    body = _decode_json_response(response)
-    assert "error" in body and "JSON" in body["error"], "Debe informar error descriptivo"
-
-
-def test_request_with_file_returns_payload_when_valid() -> None:
-    payload = {
-        "prompt": "Procesa este documento",
-        "model": "gpt-5-mini",
-        "blob_url": "https://storage/doc.pdf",
-    }
-    request = func.HttpRequest(
-        method="POST",
-        url="http://localhost/request-with-file",
-        headers={"content-type": "application/json"},
-        params={},
-        body=json.dumps(payload).encode("utf-8"),
-    )
-
-    response = function_app.request_with_file_http(request)
-
-    assert response.status_code == 200, "Debe responder 200 en solicitudes válidas"
-    body = _decode_json_response(response)
-    assert body["response_id"] == "file-response-123", "Debe propagar la respuesta del servicio"
-    assert fake_file_service.last_call == payload, "Debe llamar al servicio con los campos enviados"
 
 
 def test_chained_request_requires_previous_response_id() -> None:
@@ -291,8 +235,6 @@ def test_dispensas_process_invokes_processor_service() -> None:
 
 
 _TESTS: List[Tuple[str, Callable[[], None]]] = [
-    ("request_with_file rechaza cuerpos no JSON", test_request_with_file_rejects_invalid_json),
-    ("request_with_file responde 200 con datos válidos", test_request_with_file_returns_payload_when_valid),
     ("chained_request exige previous_response_id", test_chained_request_requires_previous_response_id),
     ("chained_request reenvía el payload al servicio", test_chained_request_calls_service_with_payload),
     ("router falla con JSON inválido", test_router_raises_with_invalid_json),

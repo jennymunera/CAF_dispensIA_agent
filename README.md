@@ -45,16 +45,15 @@ azfunc-MVP-DispensAI/
 ```
 
 ## Funciones disponibles
-1. **`request-with-file`** (`HTTP`, anónima por defecto)
-   - Body: `{ prompt, model, blob_url | file_link }`.
-   - Descarga el documento desde Blob Storage, lo sube a Azure OpenAI y devuelve `{response_id, content}` con la respuesta inicial del modelo.
-2. **`chained-request`** (`HTTP`)
+1. **`chained-request`** (`HTTP`)
    - Body: `{ prompt, model, previous_response_id }`.
    - Reutiliza el `response_id` previo para obtener la respuesta encadenada.
-3. **`router`** (`ServiceBusQueueTrigger` sobre `dispensas-router-in`)
+2. **`router`** (`ServiceBusQueueTrigger` sobre `dispensas-router-in`)
    - Valida `QueueMessageModel`, detecta los blobs a procesar (prefijo `basedocuments/{project}/raw/`) y publica tareas individuales en `dispensas-process-in`.
-4. **`dispensas_process`** (`ServiceBusQueueTrigger` sobre `dispensas-process-in`)
-   - Consume `DispensaTaskModel`, invoca `request-with-file` (el flujo encadenado queda inactivo por ahora), parsea el JSON final y lo persiste en `basedocuments/{project}/results/{documento}.json`.
+3. **`dispensas_process`** (`ServiceBusQueueTrigger` sobre `dispensas-process-in`)
+   - Consume `DispensaTaskModel`, invoca directamente a `OpenAIFileService`, parsea el JSON final y lo persiste en `basedocuments/{project}/results/{documento}.json`.
+4. **`json_to_csv_request`** (`HTTP`)
+   - Endpoint auxiliar para ejecutar `process_dispensia_json_to_csv` desde clientes externos.
 5. **`csv_global`** — **pendiente**: se implementará cuando consolidemos todos los JSON en un CSV maestro.
 
 ## Flujo end-to-end
@@ -64,7 +63,7 @@ azfunc-MVP-DispensAI/
    - `BlobDispatcherService` arma el prefijo `basedocuments/{project}/raw/`, lista los blobs o normaliza los nombres solicitados y genera un `DispensaTaskModel` por archivo.
    - `ServiceBusDispatcher` envía cada tarea a `dispensas-process-in`.
 2. **Procesamiento por documento**
-   - `DispensasProcessorService` recibe el task, llama `request-with-file` y `chained-request`, convierte el output a JSON (`parsed_json`) y lo guarda en `basedocuments/{project}/results/{documento}.json`.
+   - `DispensasProcessorService` recibe el task, invoca directamente a `OpenAIFileService` (antes `request-with-file`) y, si aplica, a `OpenAIChainedService`, convierte el output a JSON (`parsed_json`) y lo guarda en `basedocuments/{project}/results/{documento}.json`.
    - El método `process` devuelve un diccionario con metadatos del proyecto/documento, las respuestas intermedias y el JSON final listo para pasos posteriores (notificaciones, agregados, etc.).
 3. **Consolidación (por hacer)**
    - El flujo actual solo persiste los JSON individuales. La función `csv_global` tomará esos archivos de `results/` y los concatenará en un CSV fila a fila.
@@ -78,7 +77,6 @@ azfunc-MVP-DispensAI/
 ## Servicios y utilidades clave
 - `OpenAIClientFactory`: crea instancias del SDK OpenAI autenticadas con API Key o Azure AD.
 - `OpenAIFileService` / `OpenAIChainedService`: lógica portada desde el proyecto original (`request_with_file` y `chained_request`). Actualmente `OpenAIFileService` aplica fallback multimodal y persiste resultados; `chained_request` permanece disponible pero no se usa en el flujo automático.
-- `OpenAIHttpClient`: encapsula las llamadas HTTP internas y maneja `x-functions-key` si se protege el endpoint.
 - `BlobDispatcherService`: normaliza rutas, lista blobs y crea tareas `DispensaTaskModel`.
 - `DispensasProcessorService`: orquesta el flujo, parsea el resultado y lo guarda en Blob Storage.
 - `ServiceBusDispatcher`: publica mensajes en la cola de procesamiento.
@@ -97,15 +95,13 @@ azfunc-MVP-DispensAI/
 | `AZURE_OPENAI_ENDPOINT`, `USE_API_KEY`, `AZURE_OPENAI_API_KEY` | Credenciales de Azure OpenAI. |
 | `DEFAULT_OPENAI_MODEL` | Modelo por defecto si el mensaje no lo define. |
 | `DEFAULT_AGENT_PROMPT_FILE`, `DEFAULT_CHAINED_PROMPT_FILE` | Archivos relativos a `src/prompts/` (fallbacks inline: `DEFAULT_AGENT_PROMPT`, `DEFAULT_CHAINED_PROMPT`). |
-| `INTERNAL_API_BASE_URL` | URL del propio Function App para invocar los endpoints HTTP (`http://127.0.0.1:7071/api` en local, `https://<app>.azurewebsites.net/api` en Azure). |
-| `INTERNAL_API_KEY` | Function key (`x-functions-key`) si se protege el endpoint HTTP. |
 | `DOCUMENTS_BASE_PATH`, `RAW_DOCUMENTS_FOLDER`, `RESULTS_FOLDER` | Segmentos de path para raw y results (defaults `basedocuments`, `raw`, `results`). |
 
 ## Plan y estado
 1. **Modelos** ✅ — `QueueMessageModel` y `DispensaTaskModel` validados y localizados en `src/models/`.
 2. **Servicios auxiliares** ✅ — Logic de OpenAI, dispatcher de blobs, cliente HTTP y repositorio de Storage implementados.
 3. **Utilidades y prompts** ✅ — Helpers (`blob_url_parser`, `prompt_loader`, etc.) + prompts base en `src/prompts/`.
-4. **Handlers** ✅ — `router`, `dispensas_process`, `request-with-file`, `chained-request` activos; `csv_global` aún por desarrollar.
+4. **Handlers** ✅ — `router`, `dispensas_process`, `chained-request` activos; `csv_global` aún por desarrollar.
 5. **Config/Deploy** 🔄 — `requirements.txt` actualizado (`azure-servicebus`, `openai`, `azure-identity`, `requests`). Falta documentar la función CSV y la persistencia adicional si aplica.
 6. **Pruebas** — Ejecutar `func start`, enviar un mensaje de ejemplo a `dispensas-router-in` y confirmar que los JSON terminan en `results/`. (Pendiente de automatización).
 

@@ -1,19 +1,17 @@
 import json
 import logging
 import os
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Set, List
-import requests
+from typing import Any, Dict, Optional, Set
 
 from src.models.dispensa_task import DispensaTaskModel
-from src.models.queue_message import QueueMessageModel
 from src.repositories.blob_storage_repository import BlobStorageRepository
 from src.services.notifications_service import NotificationsService
 from src.services.blob_dispatcher import BlobDispatcherService
 from src.services.service_bus_dispatcher import ServiceBusDispatcher
-from src.services.openai_http_client import OpenAIHttpClient
+from src.services.openai_file_service import OpenAIFileService
+from src.services.processor_csv_service import process_dispensia_json_to_csv
 from src.utils.build_email_payload import build_email_payload
 from src.utils.response_parser import parse_json_response
 
@@ -23,7 +21,7 @@ _LOGGER = logging.getLogger(__name__)
 class DispensasProcessorService:
     def __init__(
         self,
-        http_client: OpenAIHttpClient,
+        openai_file_service: OpenAIFileService,
         blob_repository: BlobStorageRepository,
         base_path: str,
         results_folder: str,
@@ -33,7 +31,7 @@ class DispensasProcessorService:
         blob_dispatcher: Optional[BlobDispatcherService] = None,
         service_bus_dispatcher: Optional[ServiceBusDispatcher] = None,
     ) -> None:
-        self._http_client = http_client
+        self._openai_file_service = openai_file_service
         self._blob_repository = blob_repository
         self._base_path = (base_path or "").strip("/")
         self._results_folder = (results_folder or "results").strip("/")
@@ -43,7 +41,6 @@ class DispensasProcessorService:
         self._info_start_notified: Set[str] = set()
         self._blob_dispatcher = blob_dispatcher
         self._service_bus_dispatcher = service_bus_dispatcher
-        self._requeued_documents: Dict[str, Set[str]] = defaultdict(set)
         self._error_notified: Set[str] = set()
 
     def process(self, task: DispensaTaskModel) -> Dict[str, Any]:
@@ -53,7 +50,7 @@ class DispensasProcessorService:
             task.document_name,
         )
         try:
-            initial_response = self._http_client.request_with_file(
+            initial_response = self._openai_file_service.send_request_with_file(
                 blob_url=task.blob_url,
                 prompt=task.agent_prompt,
                 model=task.model,
@@ -392,47 +389,53 @@ class DispensasProcessorService:
             _LOGGER.exception("No se pudo crear el lock de CSV para el proyecto '%s'", project_id)
             return
 
-        payload = {"project_id": project_id}
         try:
-            base_url = os.environ.get("INTERNAL_API_BASE_URL", "http://127.0.0.1:7071/api").rstrip("/")
-            response = requests.post(
-                f"{base_url}/json_to_csv_request",
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=180,
+            storage_conn = os.environ["AZURE_STORAGE_OUTPUT_CONNECTION_STRING"]
+            container_name = os.environ["CONTAINER_OUTPUT_NAME"]
+            folder_output = os.environ["FOLDER_OUTPUT"]
+            folder_base_documents = os.environ["FOLDER_BASE_DOCUMENTS"]
+            filename_csv = os.environ["FILENAME_CSV"]
+            filename_json = os.environ["FILENAME_JSON"]
+        except KeyError as missing_key:
+            message = f"Variable de entorno faltante para generar CSV: {missing_key}"
+            _LOGGER.error(message)
+            self._notify_csv_error(project_id, message)
+            if lock_created:
+                self._remove_blob_safely(lock_blob)
+            return
+
+        input_path = f"{folder_base_documents}/{project_id}/results/{filename_json}"
+        output_path = f"{folder_output}/{filename_csv}"
+
+        try:
+            processed_rows = process_dispensia_json_to_csv(
+                storage_conn,
+                container_name,
+                input_path,
+                output_path,
             )
-            if response.status_code == 200:
-                _LOGGER.info("CSV generado exitosamente para el proyecto '%s'", project_id)
-                self._notify_csv_success(project_id)
-                try:
-                    self._blob_repository.upload_content_to_blob(
-                        content={"status": "done"},
-                        blob_name=done_blob,
-                        indent_json=True,
-                    )
-                except Exception:
-                    _LOGGER.warning("No se pudo crear el marcador de finalización CSV para '%s'", project_id)
-                finally:
-                    if lock_created:
-                        self._remove_blob_safely(lock_blob)
-            else:
-                _LOGGER.warning(
-                    "Error al generar CSV para el proyecto '%s': %s",
-                    project_id,
-                    response.text,
+            _LOGGER.info(
+                "CSV generado exitosamente para el proyecto '%s' con %d registros nuevos",
+                project_id,
+                processed_rows,
+            )
+            self._notify_csv_success(project_id)
+            try:
+                self._blob_repository.upload_content_to_blob(
+                    content={"status": "done"},
+                    blob_name=done_blob,
+                    indent_json=True,
                 )
-                # Enviar notificación de error de CSV
-                self._notify_csv_error(project_id, response.text)
-                if lock_created:
-                    self._remove_blob_safely(lock_blob)
+            except Exception:
+                _LOGGER.warning("No se pudo crear el marcador de finalización CSV para '%s'", project_id)
         except Exception as csv_exc:
             _LOGGER.exception(
-                "Error al llamar a json_to_csv_request para el proyecto '%s': %s",
+                "Error al generar CSV para el proyecto '%s': %s",
                 project_id,
                 csv_exc,
             )
-            # Enviar notificación de error de CSV por excepción
             self._notify_csv_error(project_id, str(csv_exc))
+        finally:
             if lock_created:
                 self._remove_blob_safely(lock_blob)
 
@@ -473,8 +476,6 @@ class DispensasProcessorService:
                         task.document_name,
                     )
             self._error_notified.add(key)
-
-        self._requeue_document(task)
 
     def _notify_csv_success(self, project_id: str) -> None:
         """Envía notificación de éxito cuando se genera el CSV para un proyecto."""

@@ -1,25 +1,30 @@
 # Plan de migración: mover `request_with_file` a `DispensasProcessorService`
 
-Este documento describe el contexto actual del proyecto **azfunc-MVP-DispensAI**, detalla los cambios necesarios para ejecutar la lógica de `request_with_file` directamente dentro de `DispensasProcessorService`, y lista las validaciones requeridas después de implementar la migración. El objetivo es eliminar la invocación HTTP interna que hoy causa timeouts (503/504) al pasar por la ruta pública de Azure Functions.
+> **Estado**: migración completada. La lógica de `request_with_file` vive ahora dentro de `DispensasProcessorService` y el endpoint HTTP (junto con `OpenAIHttpClient`) fue retirado. Este documento queda como referencia del proceso seguido y de las validaciones recomendadas.
 
 ---
 
 ## 1. Contexto del proyecto
 
-### 1.1 Arquitectura actual
-- **`function_app.py`** registra todas las funciones:
-  - `request_with_file` (HTTP): recibe `prompt`, `model`, `blob_url`; descarga el PDF, lo sube a Azure OpenAI, espera la respuesta y devuelve el contenido. Actualmente se usa también como endpoint interno.
+### 1.1 Arquitectura previa
+- **`function_app.py`** registraba todas las funciones:
+  - `request_with_file` (HTTP): recibía `prompt`, `model`, `blob_url`; descargaba el PDF, lo subía a Azure OpenAI, esperaba la respuesta y devolvía el contenido. También se usaba como endpoint interno.
   - `chained_request` (HTTP).
-  - `router` (Service Bus trigger): genera una tarea por cada PDF del proyecto.
-  - `dispensas_process` (Service Bus trigger): procesa cada documento llamando al endpoint interno `request-with-file`, parsea el JSON y guarda los resultados.
+  - `router` (Service Bus trigger): generaba una tarea por cada PDF del proyecto.
+  - `dispensas_process` (Service Bus trigger): procesaba cada documento llamando al endpoint interno `request-with-file`, parseaba el JSON y guardaba los resultados.
   - `json_to_csv_request` (HTTP).
-- **`src/services/openai_file_service.py`** implementa `send_request_with_file`, que contiene toda la lógica pesada (descargar blob, subir a OpenAI, leer respuesta, fallback de visión, almacenar resultado).
+- **`src/services/openai_file_service.py`** implementaba `send_request_with_file`, que contenía toda la lógica pesada (descargar blob, subir a OpenAI, leer respuesta, fallback de visión, almacenar resultado).
 - **`src/services/dispensas_processor.py`**:
-  - En `process(...)` invoca `OpenAIHttpClient.request_with_file(...)`, que hace un `POST` a `INTERNAL_API_BASE_URL/request-with-file`.
-  - Maneja notificaciones, agregado de JSON y disparo del CSV.
-- **`src/services/openai_http_client.py`** encapsula la llamada HTTP al endpoint interno (`requests.post`), con el timeout configurable `INTERNAL_API_TIMEOUT`.
+  - En `process(...)` invocaba `OpenAIHttpClient.request_with_file(...)`, que hacía un `POST` a `INTERNAL_API_BASE_URL/request-with-file`.
+  - Manejaba notificaciones, agregado de JSON y disparo del CSV.
+- **`src/services/openai_http_client.py`** (eliminado tras la migración) encapsulaba la llamada HTTP interna a `request-with-file`.
 
-### 1.2 Problemas detectados
+### 1.2 Arquitectura resultante
+- `request_with_file` (HTTP) fue removido; el procesamiento reside por completo en `DispensasProcessorService`.
+- `dispensas_process` usa `OpenAIFileService.send_request_with_file(...)` directamente.
+- El disparo del CSV usa `process_dispensia_json_to_csv` sin depender de invocaciones HTTP internas.
+
+### 1.3 Problemas detectados
 - Cuando `dispensas_process` ejecuta documentos grandes, el `request-with-file` puede demorar >230s. Al invocarlo vía URL pública (`https://.../api/request-with-file`), el front-end de Azure Functions corta la conexión y retorna `504 Gateway Timeout`.
 - Los reintentos sucesivos generan un `AttributeError` (`_requeue_document`) porque la versión desplegada aún lo invocaba.
 - Esta arquitectura añade una dependencia innecesaria: el trigger llama a través de HTTP en vez de reutilizar directamente `OpenAIFileService`.
@@ -38,20 +43,18 @@ Mover la lógica de `request-with-file` para que se ejecute directamente dentro 
 ## 3. Cambios propuestos
 
 1. **Actualizar `DispensasProcessorService`:**
-   - Reemplazar la llamada a `self._http_client.request_with_file(...)` por una invocación directa al servicio `OpenAIFileService`.
-   - Inyectar `OpenAIFileService` en el constructor de `DispensasProcessorService` (actualmente se inicializa en `function_app.py`, por lo que habrá que pasar la instancia como parámetro).
+   - Reemplazar la llamada a `self._http_client.request_with_file(...)` por una invocación directa al servicio `OpenAIFileService`. ✅
+   - Inyectar `OpenAIFileService` en el constructor de `DispensasProcessorService` (actualmente se inicializa en `function_app.py`, por lo que habrá que pasar la instancia como parámetro). ✅
    - Ajustar `process(...)` para recibir la respuesta del método `send_request_with_file(...)` y seguir con el flujo normal (parsear JSON, persistir, etc.).
    - Eliminar cualquier referencia a `_requeue_document` (ya no se usa) y revisar los mecanismos de error.
 
 2. **Eliminar la dependencia de `OpenAIHttpClient`:**
-   - Una vez que `DispensasProcessorService` no use `OpenAIHttpClient`, evaluar si sigue siendo necesario. Si solo lo usaba `dispensas_process`, se puede remover su instancia en `function_app.py` (o dejarlo si otras funciones lo requieren).
-   - Quitar de `local.settings.json` la variable `INTERNAL_API_BASE_URL` (o marcarla como obsoleta si otras piezas la siguen usando).
-   - Actualizar `requirements` o archivos relacionados si `openai_http_client` ya no se usa.
+   - Remover su instancia en `function_app.py` y borrar el módulo si no queda uso. ✅
+   - Quitar de `local.settings.json` la variable `INTERNAL_API_BASE_URL` (o marcarla como obsoleta si otras piezas la siguen usando). ✅
+   - Actualizar documentación para reflejar que ya no existe el wrapper HTTP. ✅
 
 3. **Refactorizar `request_with_file` (HTTP):**
-   - Opcional: mantener el endpoint HTTP para usos externos o transformarlo en un wrapper ligero que llame al mismo método directo.
-   - Si se mantiene, el HTTP debería reutilizar la misma función recién incorporada (sin duplicar lógica).
-   - Documentar el cambio (por ejemplo, que ahora `request_with_file` HTTP comparte la lógica con `DispensasProcessorService`).
+   - Se optó por eliminar el endpoint para evitar timeouts y duplicación de lógica. ✅
 
 4. **Actualizaciones adicionales:**
    - Revisar notificaciones: `self._notify_error` actualmente intenta reenviar documentos. Una vez que el flow sea directo, confirma que no quede ninguna referencia a `_requeue_document`.
@@ -92,9 +95,8 @@ Mover la lógica de `request-with-file` para que se ejecute directamente dentro 
    - Verifica que las notificaciones `ERROR_FINALLY_PROCESS` sólo salgan cuando realmente hay fallos (cambia la habilidad de reintento si hiciste nuevos ajustes).
 
 6. **Actualizar deploy y documentación:**
-   - Refresca `deploy.sh` si removiste variables.
-  - Cambia `README` o cualquier doc que mencione `INTERNAL_API_BASE_URL`.
-  - Ejecuta `./deploy.sh ...` para subir la versión final y asegurarte de que no hay referencias a la URL interna.
+   - Refrescar documentación y settings para retirar referencias a la URL interna. ✅
+   - Ejecutar `./deploy.sh ...` para subir la versión final y asegurarte de que no hay referencias obsoletas.
 
 ---
 
@@ -135,4 +137,3 @@ Mover la lógica de `request-with-file` para que se ejecute directamente dentro 
 ## 7. Resumen
 
 Esta migración reemplaza la llamada HTTP interna por una invocación directa a `OpenAIFileService`. Es la forma más rápida de eliminar los timeouts 503/504 y simplificar el pipeline. Tras aplicar los cambios, valida el flujo completo (JSON, agregado, CSV y notificaciones) tanto en local como en el entorno de Azure antes de dar por finalizada la tarea.
-

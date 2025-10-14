@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
-# script para probar manualmente el endpoint request-with-file
-"""Prueba manual del endpoint request-with-file usando un documento real."""
+"""Prueba manual del servicio OpenAIFileService usando un documento real."""
 import argparse
 import json
 import os
@@ -9,7 +8,6 @@ import sys
 from pathlib import Path
 from typing import Dict
 
-import requests
 from azure.storage.blob import BlobServiceClient
 
 
@@ -83,37 +81,6 @@ def _download_blob_text(connection_string: str, container: str, blob_name: str) 
     return blob_client.download_blob().readall().decode("utf-8")
 
 
-def _call_via_http(blob_url: str, prompt: str, model: str, storage_conn: str, container: str) -> None:
-    base_url = os.environ.get("INTERNAL_API_BASE_URL", "http://127.0.0.1:7071/api").rstrip("/")
-    payload = {"blob_url": blob_url, "prompt": prompt, "model": model}
-
-    print(f"[INFO] Endpoint: {base_url}/request-with-file")
-    print(f"[INFO] Blob: {blob_url}")
-    print("[INFO] Prompt cargado desde src/prompts/agente_unificado.txt")
-    print(f"[INFO] Modelo: {model}")
-
-    try:
-        response = requests.post(f"{base_url}/request-with-file", json=payload, timeout=180)
-    except requests.RequestException as exc:  # pragma: no cover - errores de red
-        print(f"[ERROR] No se pudo contactar al endpoint: {exc}")
-        raise SystemExit(1) from exc
-
-    print(f"[DEBUG] Status: {response.status_code}")
-    if response.status_code != 200:
-        print("[ERROR] Respuesta no exitosa:")
-        print(response.text)
-        raise SystemExit(1)
-
-    try:
-        data = response.json()
-    except ValueError:
-        print("[ERROR] El cuerpo de la respuesta no es JSON válido")
-        print(response.text)
-        raise SystemExit(1)
-
-    _print_result(data, storage_conn, container)
-
-
 def _call_direct(blob_url: str, prompt: str, model: str, storage_conn: str, container: str) -> None:
     fallback_flag = {"used": False}
     original_try = function_app.openai_file_service._try_with_images
@@ -158,15 +125,10 @@ def _print_result(data: Dict[str, str], storage_conn: str, container: str) -> No
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Prueba request-with-file")
-    parser.add_argument(
-        "--direct",
-        action="store_true",
-        help="Ejecuta send_request_with_file directamente para detectar fallback",
-    )
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description="Prueba de procesamiento de archivo con OpenAIFileService")
+    parser.parse_args()
 
-    print("=== Prueba: request-with-file ===")
+    print("=== Prueba directa de OpenAIFileService ===")
     _ensure_environment()
 
     try:
@@ -180,10 +142,7 @@ def main() -> None:
     blob_url = _build_blob_url(storage_conn, container, DOCUMENT_PATH)
     prompt = _load_prompt()
 
-    if args.direct:
-        _call_direct(blob_url, prompt, model, storage_conn, container)
-    else:
-        _call_via_http(blob_url, prompt, model, storage_conn, container)
+    _call_direct(blob_url, prompt, model, storage_conn, container)
 
     print("=== Fin de la prueba ===")
 
