@@ -45,6 +45,12 @@ DETECCIÓN DE SECCIONES (TOLERANTE A OCR)
 -  Excluir “Antecedentes”: NO utilices contenido de Antecedentes (ni equivalentes como “Marco general/Contexto histórico”) para clasificar ni fechar; puede leerlo para entender el contexto, pero no sirve como evidencia para campos ni para decidir el tipo de dispensa.
 -  Emparejamiento: si hay múltiples dispensas, asocia cada Recomendación con la Justificación válida más cercana anterior; si no existe, deja la clasificación en null.
 
+Filtro anti-antecedentes (obligatorio):
+	•	No conviertas en dispensa ninguna mención histórica en pasado del tipo: “se procesó una primera/segunda/tercera… dispensa”, “se extendió el plazo…”, “se aprobó el … en [fecha]”, “mediante memo [código] del [fecha]…”.
+	•	Estas frases son histórico/recapitulación. Solo sirven como contexto y pueden citarse en observacion, no generan filas en dispensas.
+	•	Una dispensa válida debe tener en este mismo documento un acto vigente con verbo autorizativo en presente/imperativo/modales: “se recomienda/solicita/autoriza/aprueba…”, o una Resolución/Acuerdo/Se resuelve explícita.
+
+
 SEGMENTACIÓN DE DISPENSAS (MÚLTIPLES RETOS/DIFICULTADES)
 
 - Unidad mínima (qué es “una dispensa”): un acto concreto de “se solicita/se recomienda/se autoriza” que afecta una obligación/condición específica (p. ej., prorrogar entrega de EEFF, extender informe semestral, reasignar partidas).
@@ -56,6 +62,10 @@ SEGMENTACIÓN DE DISPENSAS (MÚLTIPLES RETOS/DIFICULTADES)
 	- Enumeraciones en Recomendación/Solicitud (i), (ii), 1., 2., viñetas) con verbos autorizativos separados (“se solicita…”, “asimismo, se solicita…”).
 - No fragmentar sin necesidad: si varios retos/dificultades solo justifican un mismo acto de dispensa (mismo objeto y misma fecha propuesta), mantén una única dispensa con esa justificación consolidada.
 - Emparejamiento de anclas: cada dispensa segmentada debe tener su Justificación asociada (la válida más cercana anterior) y su Recomendación/Solicitud correspondiente; si falta alguno, deja la clasificación en null con confidence:"no encontrado".
+
+Regla anti-histórico:
+	•	No segmentes enumeraciones que solo listan hechos pasados (p. ej., “primera/segunda/tercera/… dispensa ya otorgada”).
+	•	Solo segmenta cuando cada punto tenga Recomendación/Solicitud/Resolución vigente en este documento. Si el numeral es un antecedente, no crea fila.
 
 FECHAS
 
@@ -74,6 +84,7 @@ FECHAS
  
 -  fecha_extraccion :  fecha actual (YYYY-MM-DD) tomar del [Contexto de ejecución]
 
+- Coherencia temporal (soft-check): si fecha_dispensa.value (del encabezado del documento) < fecha_esperada.value de la última prórroga citada, interpretar las prórrogas anteriores como antecedentes; extraer solo la prórroga actualmente recomendada/solicitada/autoriza en este documento.
 
 FORMATO POR CAMPO
 
@@ -243,6 +254,8 @@ PISTAS DE DESAMBIGUACIÓN:
 - “autorizar pago directo / eximir procedimiento / superar límite” → Excepción de límite de transacciones;
   si no encaja exactamente, usar Otras condiciones especiales y guardar el literal en `observacion` con evidencia.
 
+- Frases típicas de antecedentes (ignorar como dispensa): “se procesó una [n] dispensa…”, “se extendió… hasta…”, “mediante memo/carta/oficio N°… del …”, “se aprobó previamente…”.
+- Frases típicas de acto vigente (sí es dispensa): “se recomienda aprobar…”, “se solicita prórroga…”, “se autoriza…”, “Se resuelve: prorrogar…”.
 
 MULTI-CLASIFICACIÓN (FILAS MÚLTIPLES POR LA MISMA DISPENSA)
 
@@ -260,6 +273,10 @@ TRAZABILIDAD Y LÍMITES
 - Excepción de evidencias: se permite `evidencia: []` para campos tomados del **[Contexto de ejecución]** 
   (`fecha_extraccion`, `fuente_archivo`, `codigo_cfa`) y para cualquier campo con `confidence:"no encontrado"`.
 
+- Registro de antecedentes: Cuando el documento incluya recapitulaciones de dispensas pasadas, no las extraigas como filas. En su lugar, consólidalas en observacion.value como texto breve (p. ej., “Antecedentes: 1ª (28.06.12), 2ª (05.03.13), 3ª (04.09.13), …”), con una o dos evidencias máximo.
+- Economía de evidencia para antecedentes: máximo 2 snippet cortos para todo el bloque de antecedentes (evitar ruido).
+
+
 AUTO-VERIFICACIÓN (ANTES DE RESPONDER)
 
 - Asegura que `cluster/categoria/subcategoria` estén sustentados por Justificación, y `tipo_dispensa/temporalidad` por Recomendación/Solicitud. Si no hay sustento inequívoco, usa `value:null` y `confidence:"no encontrado"`.
@@ -270,6 +287,9 @@ AUTO-VERIFICACIÓN (ANTES DE RESPONDER)
 
 - Fechas: si el literal es parcial, conserva el literal; si es relativo/ambiguo, value:null + literal en evidencia.snippet.
 - Deduplica dispensas idénticas.
+- Chequeo de vigencia (hard-fail): para cada entrada en dispensas, verifica que anclas.recomendacion_texto.value no sea null y que el texto contenga un verbo autorizativo vigente (regex aproximada: \\b(recomienda|solicita|autoriza|aprueba|se resuelve|acuerda)\\b).
+- Si no pasa el chequeo, descarta esa fila (no la devuelvas con null: elimínala).
+- Detección de pasado/antecedente: si la evidencia principal de la fila contiene verbos en pasado del tipo se procesó|se extendió|se aprobó|mediante memo .* del \\d{2}\\.\\d{2}\\.\\d{2,4} y no hay Recomendación/Solicitud vigente asociada, descarta la fila.
 
 
 ESTRUCTURA JSON EXACTA (SALIDA)

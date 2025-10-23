@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -66,18 +67,22 @@ class OpenAIFileService:
                     )
                     time.sleep(wait_time)
 
-            response = client.responses.create(
-                model=model,
-                input=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": prompt},
-                            {"type": "input_file", "file_id": uploaded_file_id},
-                        ],
-                    }
-                ],
-            )
+            try:
+                response = client.responses.create(
+                    model=model,
+                    input=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": prompt},
+                                {"type": "input_file", "file_id": uploaded_file_id},
+                            ],
+                        }
+                    ],
+                )
+            except Exception as response_exc:
+                self._log_openai_exception(response_exc, model=model, blob_name=blob_name)
+                raise
 
             content = extract_response_text(response)
             result = {"response_id": response.id, "content": content}
@@ -192,10 +197,14 @@ class OpenAIFileService:
             content_blocks.append({"type": "input_image", "image_url": data_url})
             _LOGGER.debug("Se añadió imagen %s al payload de fallback", index)
 
-        response = client.responses.create(
-            model=vision_model,
-            input=[{"role": "user", "content": content_blocks}],
-        )
+        try:
+            response = client.responses.create(
+                model=vision_model,
+                input=[{"role": "user", "content": content_blocks}],
+            )
+        except Exception as response_exc:
+            self._log_openai_exception(response_exc, model=vision_model, blob_name=blob_name)
+            raise
 
         content = getattr(response, "output_text", "") or ""
         if not content and getattr(response, "output", None):
@@ -264,3 +273,38 @@ class OpenAIFileService:
             target_blob,
             project,
         )
+
+    def _log_openai_exception(self, exc: Exception, *, model: str, blob_name: str) -> None:
+        status_code = getattr(exc, "status_code", None)
+        response = getattr(exc, "response", None)
+        request_id = None
+        response_excerpt = None
+
+        headers = getattr(response, "headers", None)
+        if headers is not None:
+            getter = getattr(headers, "get", None)
+            if callable(getter):
+                request_id = getter("x-request-id") or getter("apim-request-id")
+
+        if response is not None and hasattr(response, "text"):
+            try:
+                response_excerpt = response.text[:500]
+            except Exception:  # pragma: no cover - best effort
+                response_excerpt = None
+
+        _LOGGER.error(
+            "OpenAI responses.create falló (modelo=%s, blob='%s', status=%s, request_id=%s, tipo_error=%s): %s",
+            model,
+            blob_name,
+            status_code,
+            request_id,
+            exc.__class__.__name__,
+            exc,
+        )
+        if response_excerpt:
+            _LOGGER.debug(
+                "Respuesta parcial de OpenAI para el blob '%s' (modelo=%s): %s",
+                blob_name,
+                model,
+                response_excerpt,
+            )

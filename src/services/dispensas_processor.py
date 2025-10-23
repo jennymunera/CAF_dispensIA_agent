@@ -49,6 +49,32 @@ class DispensasProcessorService:
             task.project_id,
             task.document_name,
         )
+        
+        # Verificar si el documento ya fue procesado (prevención de duplicados)
+        try:
+            skip_reprocessing = (os.getenv("SKIP_REPROCESSING", "false").strip().lower() in ("true", "1", "yes"))
+            if skip_reprocessing:
+                result_blob_name = self._build_result_blob_name(task)
+                if self._blob_exists(result_blob_name):
+                    _LOGGER.info(
+                        "Documento '%s' del proyecto '%s' ya fue procesado (existe '%s'). Omitiendo reprocesamiento.",
+                        task.document_name,
+                        task.project_id,
+                        result_blob_name,
+                    )
+                    # Retornar resultado simulado para mantener compatibilidad
+                    return {
+                        "project_id": task.project_id,
+                        "document_name": task.document_name,
+                        "blob_url": task.blob_url,
+                        "initial_response": {"content": "Documento ya procesado previamente"},
+                        "chained_response": None,
+                        "parsed_json": {"status": "already_processed"},
+                        "skipped": True,
+                    }
+        except Exception:
+            _LOGGER.exception("Error verificando si el documento ya fue procesado; continuando con procesamiento normal")
+        
         try:
             initial_response = self._openai_file_service.send_request_with_file(
                 blob_url=task.blob_url,
@@ -100,6 +126,18 @@ class DispensasProcessorService:
                     task.project_id,
                 )
                 self._notify_error(task, exc)
+
+            # Auto-limpiar el marcador csv_generation.done si el flag está activo
+            try:
+                auto_clear = (os.getenv("AUTO_CLEAR_CSV_DONE", "false").strip().lower() in ("true", "1", "yes"))
+                if auto_clear:
+                    project_id = (task.project_id or "").strip("/")
+                    done_blob = f"{self._base_path}/{project_id}/{self._results_folder}/csv_generation.done"
+                    _LOGGER.info("AUTO_CLEAR_CSV_DONE activo; intentando eliminar marcador '%s'", done_blob)
+                    self._remove_blob_safely(done_blob)
+            except Exception:
+                _LOGGER.exception("No se pudo auto-limpiar csv_generation.done para el proyecto '%s'", task.project_id)
+
             # Generar CSV sólo cuando el proyecto haya completado todo su procesamiento
             self._maybe_generate_csv(task)
         except Exception:

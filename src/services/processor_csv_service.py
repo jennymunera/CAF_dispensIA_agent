@@ -4,6 +4,8 @@ import pandas as pd
 from azure.storage.blob import BlobServiceClient
 import io
 from datetime import datetime
+import os
+import hashlib
 
 
 def _normalize_date(raw: str) -> str:
@@ -98,6 +100,21 @@ def process_dispensia_json_to_csv(
         logging.info(f"Se generaron {len(df_new)} registros a partir del JSON.")
         if "id_dispensa" in df_new.columns:
             df_new = df_new.drop(columns=["id_dispensa"])
+        # Añadir firma estable por fila (excluye fecha_extraccion, id_dispensa)
+        def _row_signature(series):
+            try:
+                d = series.to_dict()
+                d.pop("fecha_extraccion", None)
+                d.pop("id_dispensa", None)
+                # Normalizar NaN
+                for k, v in list(d.items()):
+                    if pd.isna(v):
+                        d[k] = None
+                raw = json.dumps(d, sort_keys=True, ensure_ascii=False)
+                return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            except Exception:
+                return ""
+        df_new["__signature"] = df_new.apply(_row_signature, axis=1)
 
         # 3️⃣ Descargar CSV existente si hay
         csv_blob_client = container_client.get_blob_client(output_csv_blob)
@@ -105,6 +122,9 @@ def process_dispensia_json_to_csv(
             existing_data = csv_blob_client.download_blob().readall()
             df_existing = pd.read_csv(io.BytesIO(existing_data))
             logging.info(f"CSV existente encontrado con {len(df_existing)} registros.")
+            # Asegurar firma en CSV existente si falta
+            if "__signature" not in df_existing.columns:
+                df_existing["__signature"] = df_existing.apply(_row_signature, axis=1)
             df_final = pd.concat([df_existing, df_new], ignore_index=True)
         except Exception:
             logging.info("No existía dispensia.csv, se creará uno nuevo.")
@@ -115,8 +135,22 @@ def process_dispensia_json_to_csv(
         if "fecha_extraccion" in df_final.columns:
             df_final["fecha_extraccion"] = df_final["fecha_extraccion"].apply(_normalize_date)
 
+        # Deduplicación opcional por flag
+        try:
+            dedup_enabled = (os.getenv("CSV_DEDUPLICATE", "false").strip().lower() in ("true", "1", "yes"))
+            if dedup_enabled:
+                before = len(df_final)
+                # Deduplicar por firma estable
+                df_final = df_final.drop_duplicates(subset=["__signature"])
+                logging.info(f"Deduplicación aplicada: {before} -> {len(df_final)} registros.")
+        except Exception:
+            logging.exception("Error al aplicar deduplicación opcional del CSV")
+
         # 4️⃣ Guardar CSV actualizado
         output_stream = io.BytesIO()
+        # Remover columna interna de firma antes de escribir
+        if "__signature" in df_final.columns:
+            df_final = df_final.drop(columns=["__signature"])
         df_final.to_csv(output_stream, index=False, encoding="utf-8-sig")
         output_stream.seek(0)
         csv_blob_client.upload_blob(output_stream, overwrite=True)

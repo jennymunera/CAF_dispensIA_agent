@@ -36,7 +36,7 @@ if str(ROOT) not in sys.path:
 
 import function_app
 
-DOCUMENT_PATH = "basedocuments/CFA007671/raw/EED-048.PDF"
+DOCUMENT_PATH = "basedocuments/CFA007902/raw/EED-582.pdf"
 
 
 def _load_prompt() -> str:
@@ -81,15 +81,19 @@ def _download_blob_text(connection_string: str, container: str, blob_name: str) 
     return blob_client.download_blob().readall().decode("utf-8")
 
 
-def _call_direct(blob_url: str, prompt: str, model: str, storage_conn: str, container: str) -> None:
+def _call_direct(blob_url: str, prompt: str, model: str, storage_conn: str, container: str, force_vision: bool = False) -> None:
     fallback_flag = {"used": False}
     original_try = function_app.openai_file_service._try_with_images
+    # Fuerza el fallback de visión haciendo que _should_retry_with_images siempre devuelva True
+    original_should = function_app.openai_file_service._should_retry_with_images
 
     def wrapped_try(blob_bytes, prompt_text):
         fallback_flag["used"] = True
         return original_try(blob_bytes, prompt_text)
 
     function_app.openai_file_service._try_with_images = wrapped_try
+    if force_vision:
+        function_app.openai_file_service._should_retry_with_images = lambda content: True
 
     try:
         print("[INFO] Ejecutando send_request_with_file directamente (sin HTTP)")
@@ -100,6 +104,7 @@ def _call_direct(blob_url: str, prompt: str, model: str, storage_conn: str, cont
         )
     finally:
         function_app.openai_file_service._try_with_images = original_try
+        function_app.openai_file_service._should_retry_with_images = original_should
 
     print(f"[DEBUG] Fallback a visión utilizado: {fallback_flag['used']}")
     _print_result(result, storage_conn, container)
@@ -126,7 +131,8 @@ def _print_result(data: Dict[str, str], storage_conn: str, container: str) -> No
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prueba de procesamiento de archivo con OpenAIFileService")
-    parser.parse_args()
+    parser.add_argument("--force-vision", action="store_true", help="Forzar fallback al modelo de visión")
+    args = parser.parse_args()
 
     print("=== Prueba directa de OpenAIFileService ===")
     _ensure_environment()
@@ -142,7 +148,7 @@ def main() -> None:
     blob_url = _build_blob_url(storage_conn, container, DOCUMENT_PATH)
     prompt = _load_prompt()
 
-    _call_direct(blob_url, prompt, model, storage_conn, container)
+    _call_direct(blob_url, prompt, model, storage_conn, container, force_vision=args.force_vision)
 
     print("=== Fin de la prueba ===")
 

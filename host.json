@@ -1,5 +1,6 @@
 {
   "version": "2.0",
+  "functionTimeout": "01:00:00",
   "logging": {
     "applicationInsights": {
       "samplingSettings": {
@@ -17,7 +18,7 @@
       "prefetchCount": 0,
       "messageHandlerOptions": {
         "maxConcurrentCalls": 1,
-        "maxAutoRenewDuration": "00:15:00"
+        "maxAutoRenewDuration": "01:10:00"
       }
     }
   }

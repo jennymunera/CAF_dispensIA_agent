@@ -200,6 +200,14 @@ def router(message: func.ServiceBusMessage) -> None:
     connection=SERVICE_BUS_CONNECTION_SETTING,
 )
 def dispensas_process(message: func.ServiceBusMessage) -> None:
+    # Log del DeliveryCount para detectar reintentos
+    delivery_count = getattr(message, 'delivery_count', 1)
+    logger.info(
+        "Procesando mensaje con DeliveryCount: %d (reintento: %s)",
+        delivery_count,
+        "Sí" if delivery_count > 1 else "No"
+    )
+    
     try:
         payload = message.get_body().decode("utf-8")
         data = json.loads(payload)
