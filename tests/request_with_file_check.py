@@ -35,8 +35,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import function_app
+from src.utils.response_parser import parse_json_response
 
-DOCUMENT_PATH = "basedocuments/CFA007902/raw/EED-582.pdf"
+DOCUMENT_PATH = "basedocuments/CFA011985/raw/EED - 3290  Reversión del Gasoducto Norte.pdf"
 
 
 def _load_prompt() -> str:
@@ -115,8 +116,16 @@ def _print_result(data: Dict[str, str], storage_conn: str, container: str) -> No
     content = data.get("content") or ""
 
     print(f"[RESULT] response_id: {response_id}")
-    print("[RESULT] content:\n")
+    print("[RESULT] content (raw):\n")
     print(content)
+
+    # Intentar parsear y mostrar el JSON completo de la respuesta
+    try:
+        parsed = parse_json_response(content)
+        print("\n[RESULT] content (parsed JSON):\n")
+        print(json.dumps(parsed, indent=2, ensure_ascii=False))
+    except Exception as exc:
+        print(f"[WARN] No se pudo parsear el contenido como JSON: {exc}")
 
     if response_id:
         processed_blob = _build_processed_blob_path(DOCUMENT_PATH)
@@ -126,7 +135,17 @@ def _print_result(data: Dict[str, str], storage_conn: str, container: str) -> No
             print(f"[WARN] No se pudo leer el blob procesado '{processed_blob}': {exc}")
         else:
             print(f"[INFO] Blob almacenado: {processed_blob}")
-            print(stored)
+            # El blob contiene un JSON con {response_id, content}; intentamos parsear su content
+            try:
+                stored_obj = json.loads(stored)
+                stored_content = stored_obj.get("content") or ""
+                parsed_stored = parse_json_response(stored_content)
+                print("\n[INFO] Blob content (parsed JSON):\n")
+                print(json.dumps(parsed_stored, indent=2, ensure_ascii=False))
+            except Exception as exc:
+                print(f"[WARN] No se pudo parsear el blob como JSON: {exc}")
+                print("[INFO] Blob content (raw):\n")
+                print(stored)
 
 
 def main() -> None:
